@@ -14,6 +14,7 @@ SHELL := /bin/bash
 
 COMPOSE     := docker compose
 WEB         := kozons-web
+DB          := kozons-db
 REDIS       := kozons-redis
 DJANGO      := $(COMPOSE) exec -T $(WEB) python manage.py
 CADDY       ?= eprinters_caddy
@@ -22,8 +23,8 @@ SHARED_DIR  ?= /srv/apps/kozons
 HEALTH_URL  ?= http://127.0.0.1:8020/manifest.webmanifest
 
 .PHONY: help rebuild pull build up down restart reload status ps health \
-		logs logs-web logs-redis kozons-web kozons-redis shell \
-		migrate migrate-check makemigrations superuser check backup \
+		logs logs-web logs-db logs-redis kozons-web kozons-db kozons-redis shell dbshell \
+		migrate migrate-check makemigrations superuser check backup restore \
 		dirs caddy-install caddy-validate caddy-reload caddy-logs prune
 
 help: ## Affiche cette aide
@@ -53,8 +54,8 @@ rebuild: ## ⭐ git pull + build de l'image + redémarrage + Caddy
 		|| echo -e "\n  \033[33m⚠ Migrations en attente : lancez  make migrate\033[0m\n"
 
 dirs: ## Crée les dossiers persistants (propriétaire uid 1000 du conteneur)
-	@mkdir -p data $(SHARED_DIR)/media $(SHARED_DIR)/static
-	@chown -R 1000:1000 data $(SHARED_DIR)
+	@mkdir -p backups $(SHARED_DIR)/media $(SHARED_DIR)/static
+	@chown -R 1000:1000 $(SHARED_DIR)
 
 pull: ## Récupère le code sans redéployer
 	git pull --ff-only
@@ -98,6 +99,9 @@ logs: ## Logs de tous les services (Ctrl-C pour quitter)
 logs-web: ## Logs de Django / Daphne
 	$(COMPOSE) logs -f --tail=100 $(WEB)
 
+logs-db: ## Logs de PostgreSQL
+	$(COMPOSE) logs -f --tail=100 $(DB)
+
 logs-redis: ## Logs de Redis
 	$(COMPOSE) logs -f --tail=100 $(REDIS)
 
@@ -109,6 +113,11 @@ caddy-logs: ## Logs du Caddy partagé
 # =============================================================================
 kozons-web: ## ⭐ Ouvre un shell dans le conteneur Django (migrations, etc.)
 	$(COMPOSE) exec $(WEB) bash
+
+kozons-db: ## Ouvre psql dans le conteneur PostgreSQL
+	$(COMPOSE) exec $(DB) sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+dbshell: kozons-db
 
 kozons-redis: ## Ouvre redis-cli dans le conteneur Redis
 	$(COMPOSE) exec $(REDIS) redis-cli
@@ -139,11 +148,17 @@ superuser: ## Crée un compte administrateur
 check: ## Vérifications Django de production
 	$(DJANGO) check --deploy
 
-backup: ## Sauvegarde la base SQLite dans backups/
+backup: ## Sauvegarde PostgreSQL dans backups/ (dump compressé)
 	@mkdir -p backups
-	$(COMPOSE) exec -T $(WEB) python -c "import sqlite3; s=sqlite3.connect('/app/data/db.sqlite3'); d=sqlite3.connect('/app/data/backup.sqlite3'); s.backup(d); d.close()"
-	mv data/backup.sqlite3 backups/db-$$(date +%Y%m%d-%H%M%S).sqlite3
+	$(COMPOSE) exec -T $(DB) sh -c 'pg_dump -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Fc -f /backups/kozons-$$(date +%Y%m%d-%H%M%S).dump'
 	@ls -lh backups | tail -5
+
+restore: ## Restaure un dump : make restore FILE=backups/kozons-XXXX.dump
+	@test -n "$(FILE)" || { echo "  Usage : make restore FILE=backups/kozons-XXXX.dump"; exit 1; }
+	@read -p "  Écraser la base actuelle avec $(FILE) ? [o/N] " r && [ "$$r" = o ]
+	$(COMPOSE) stop $(WEB)
+	$(COMPOSE) exec -T $(DB) sh -c 'pg_restore -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" --clean --if-exists --no-owner /backups/$(notdir $(FILE))'
+	$(COMPOSE) start $(WEB)
 
 # =============================================================================
 # CADDY (partagé)

@@ -61,19 +61,35 @@ TEMPLATES = [
 WSGI_APPLICATION = 'koz.wsgi.application'
 ASGI_APPLICATION = 'koz.asgi.application'
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        # En production (Docker) la base vit dans un volume : SQLITE_PATH=/app/data/db.sqlite3
-        'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
-        'OPTIONS': {
-            # WAL : lectures concurrentes pendant les écritures (temps réel).
-            'init_command': 'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;',
-            'transaction_mode': 'IMMEDIATE',
-            'timeout': 20,
-        },
+if config('DB_ENGINE', default='sqlite') == 'postgresql':
+    # Production (VPS) : conteneur kozons-db, variables imposées par docker-compose.yml.
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': config('DB_NAME', default='kozons'),
+            'USER': config('DB_USER', default='kozons'),
+            'PASSWORD': config('DB_PASSWORD'),
+            'HOST': config('DB_HOST', default='kozons-db'),
+            'PORT': config('DB_PORT', default='5432'),
+            # Connexions réutilisées entre requêtes (Daphne : un seul processus).
+            'CONN_MAX_AGE': 60,
+            'CONN_HEALTH_CHECKS': True,
+        }
     }
-}
+else:
+    # Développement : SQLite.
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
+            'OPTIONS': {
+                # WAL : lectures concurrentes pendant les écritures (temps réel).
+                'init_command': 'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;',
+                'transaction_mode': 'IMMEDIATE',
+                'timeout': 20,
+            },
+        }
+    }
 
 # Redis si disponible (multi-processus / production), sinon mémoire (dev).
 if os.environ.get('KOZONS_REDIS_URL'):

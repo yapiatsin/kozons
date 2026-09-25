@@ -15,17 +15,19 @@ services:
     container_name: kozons-web
     restart: unless-stopped
     depends_on:
+      kozons-db:
+        condition: service_healthy
       kozons-redis:
         condition: service_healthy
     env_file:
       - .env
     environment:
       # Valeurs imposées en production, quel que soit le contenu de .env.
-      SQLITE_PATH: /app/data/db.sqlite3
+      DB_ENGINE: postgresql
+      DB_HOST: kozons-db
+      DB_PORT: "5432"
       KOZONS_REDIS_URL: redis://kozons-redis:6379/0
     volumes:
-      # Base SQLite : survit aux rebuilds.
-      - ./data:/app/data
       # Uploads et statiques : dossiers lus directement par Caddy.
       - /srv/apps/kozons/media:/app/media
       - /srv/apps/kozons/static:/app/staticfiles
@@ -35,6 +37,29 @@ services:
     networks:
       - kozons
       - caddy
+
+  kozons-db:
+    image: postgres:16-alpine
+    container_name: kozons-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-kozons}
+      POSTGRES_USER: ${DB_USER:-kozons}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD manquant dans .env}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      # Données PostgreSQL : volume Docker, survit aux rebuilds et à `make down`.
+      - pgdata:/var/lib/postgresql/data
+      # Dépôt des sauvegardes (make backup / make restore).
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kozons} -d ${DB_NAME:-kozons}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - kozons
 
   kozons-redis:
     image: redis:7-alpine
@@ -50,8 +75,11 @@ services:
     networks:
       - kozons
 
+volumes:
+  pgdata:
+
 networks:
-  # Réseau privé : seul kozons-web joint Redis.
+  # Réseau privé : seul kozons-web joint PostgreSQL et Redis.
   kozons:
     driver: bridge
   # Réseau du Caddy partagé, déjà créé sur le VPS.

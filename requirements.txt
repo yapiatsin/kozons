@@ -5,3 +5,5 @@ Pillow>=12.0
 python-decouple>=3.8
 # Channel layer Redis (production, conteneur kozons-redis) :
 channels-redis>=4.2
+# PostgreSQL (production, conteneur kozons-db) :
+psycopg[binary]>=3.2
