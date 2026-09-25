@@ -1,0 +1,60 @@
+# Pile de production Kozons — déployée dans /opt/kozons sur le VPS (voir Makefile).
+#
+# Troisième projet du VPS : le Caddy (eprinters_caddy) est partagé avec eprinters
+# et autopiece. Il n'est donc pas lancé ici ; il joint kozons-web par son nom sur
+# le réseau `web` et sert /static et /media depuis /srv/apps/kozons.
+# Le fichier de site se trouve dans caddy/kozons.caddy.
+#
+# Noms préfixés `kozons-` : sur le réseau partagé, un service nommé `web` entrerait
+# en collision avec celui d'eprinters.
+
+services:
+  kozons-web:
+    build: .
+    image: kozons-web:latest
+    container_name: kozons-web
+    restart: unless-stopped
+    depends_on:
+      kozons-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Valeurs imposées en production, quel que soit le contenu de .env.
+      SQLITE_PATH: /app/data/db.sqlite3
+      KOZONS_REDIS_URL: redis://kozons-redis:6379/0
+    volumes:
+      # Base SQLite : survit aux rebuilds.
+      - ./data:/app/data
+      # Uploads et statiques : dossiers lus directement par Caddy.
+      - /srv/apps/kozons/media:/app/media
+      - /srv/apps/kozons/static:/app/staticfiles
+    ports:
+      # Accès local uniquement (sonde, dépannage). autopiece utilise déjà 8010.
+      - "127.0.0.1:8020:8000"
+    networks:
+      - kozons
+      - caddy
+
+  kozons-redis:
+    image: redis:7-alpine
+    container_name: kozons-redis
+    restart: unless-stopped
+    # Sert uniquement de channel layer (messages temps réel) : aucune persistance utile.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - kozons
+
+networks:
+  # Réseau privé : seul kozons-web joint Redis.
+  kozons:
+    driver: bridge
+  # Réseau du Caddy partagé, déjà créé sur le VPS.
+  caddy:
+    external: true
+    name: web

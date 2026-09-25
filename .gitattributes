@@ -1,0 +1,6 @@
+# Fichiers exécutés sur le VPS Linux : toujours en LF, même depuis Windows.
+*.sh       text eol=lf
+Makefile   text eol=lf
+Dockerfile text eol=lf
+*.yml      text eol=lf
+*.caddy    text eol=lf

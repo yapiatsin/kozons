@@ -1,0 +1,52 @@
+# Kozons — site importé par le Caddy partagé du VPS (eprinters_caddy).
+# `make rebuild` copie ce fichier dans /opt/caddy-sites/30-kozons.caddy puis recharge Caddy.
+# Pas de bloc global ici : email ACME et trusted_proxies sont dans le Caddyfile principal.
+
+www.kozonstic.com {
+	redir https://kozonstic.com{uri} permanent
+}
+
+kozonstic.com {
+	encode zstd gzip
+
+	# Vidéos et documents jusqu'à 100 Mo (KOZONS_MAX_UPLOAD) + marge multipart.
+	request_body {
+		max_size 110MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Fichiers statiques (collectstatic) — URLs versionnées par ?v=, cache long.
+	handle_path /static/* {
+		root * /srv/apps/kozons/static
+		file_server
+		header Cache-Control "public, max-age=2592000"
+	}
+
+	# Fichiers envoyés par les utilisateurs.
+	handle_path /media/* {
+		root * /srv/apps/kozons/media
+		file_server
+		header Cache-Control "public, max-age=86400"
+	}
+
+	# Application Django : HTTP + WebSocket (/ws/).
+	handle {
+		reverse_proxy kozons-web:8000 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	log {
+		output file /data/kozons-access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+		format json
+	}
+}

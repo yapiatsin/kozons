@@ -11,6 +11,11 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1,*', cast=Csv())
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='', cast=Csv())
 
+# Derrière Caddy (HTTPS terminé par le proxy) : Django doit savoir que la requête était en https.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+
 INSTALLED_APPS = [
     'daphne',
     'django.contrib.admin',
@@ -59,7 +64,8 @@ ASGI_APPLICATION = 'koz.asgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        # En production (Docker) la base vit dans un volume : SQLITE_PATH=/app/data/db.sqlite3
+        'NAME': config('SQLITE_PATH', default=str(BASE_DIR / 'db.sqlite3')),
         'OPTIONS': {
             # WAL : lectures concurrentes pendant les écritures (temps réel).
             'init_command': 'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;',
