@@ -6,11 +6,15 @@ import { h, clear, icon, btn, avatar, toast, errorToast, ringtone, duration, lis
 
 let current = null;
 let iceServers = null;
+let iceFetchedAt = 0;
 
+// Les identifiants TURN sont temporaires (24 h) : on les redemande toutes les heures.
 async function getIce() {
-  if (!iceServers) {
-    try { ({ ice_servers: iceServers } = await api.get('calls/ice')); }
-    catch (e) { iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]; }
+  if (!iceServers || Date.now() - iceFetchedAt > 3600 * 1000) {
+    try {
+      ({ ice_servers: iceServers } = await api.get('calls/ice'));
+      iceFetchedAt = Date.now();
+    } catch (e) { iceServers = iceServers || [{ urls: 'stun:stun.l.google.com:19302' }]; }
   }
   return iceServers;
 }

@@ -495,14 +495,34 @@ def call_history(request):
     return {'results': [call_data(c, request.user) for c in calls]}
 
 
+TURN_CREDENTIAL_TTL = 24 * 3600
+
+
 @api(['GET'])
 def ice_servers(request):
-    """Serveurs STUN/TURN pour WebRTC (configurez KOZONS_TURN_* en production)."""
+    """Serveurs STUN/TURN pour WebRTC (configurez KOZONS_TURN_* en production).
+
+    KOZONS_TURN_URL accepte plusieurs URL séparées par des virgules (udp, tcp…).
+    Avec KOZONS_TURN_SECRET (static-auth-secret de coturn), chaque utilisateur reçoit un
+    identifiant temporaire (« TURN REST API ») : utilisateur = « expiration:id »,
+    mot de passe = base64(HMAC-SHA1(secret, utilisateur)). Sinon KOZONS_TURN_USER/PASSWORD fixes.
+    """
+    import base64
+    import hashlib
+    import hmac
     import os
+    import time
     servers = [{'urls': ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302']}]
-    if os.environ.get('KOZONS_TURN_URL'):
-        servers.append({'urls': os.environ['KOZONS_TURN_URL'],
-                        'username': os.environ.get('KOZONS_TURN_USER', ''),
-                        'credential': os.environ.get('KOZONS_TURN_PASSWORD', '')})
-    return {'ice_servers': servers}
+    turn_urls = [u.strip() for u in os.environ.get('KOZONS_TURN_URL', '').split(',') if u.strip()]
+    if turn_urls:
+        secret = os.environ.get('KOZONS_TURN_SECRET')
+        if secret:
+            username = f'{int(time.time()) + TURN_CREDENTIAL_TTL}:{request.user.pk}'
+            digest = hmac.new(secret.encode(), username.encode(), hashlib.sha1).digest()
+            credential = base64.b64encode(digest).decode()
+        else:
+            username = os.environ.get('KOZONS_TURN_USER', '')
+            credential = os.environ.get('KOZONS_TURN_PASSWORD', '')
+        servers.append({'urls': turn_urls, 'username': username, 'credential': credential})
+    return {'ice_servers': servers, 'ttl': TURN_CREDENTIAL_TTL}
 

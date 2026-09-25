@@ -27,6 +27,9 @@ services:
       DB_HOST: kozons-db
       DB_PORT: "5432"
       KOZONS_REDIS_URL: redis://kozons-redis:6379/0
+      # Appels WebRTC : relais kozons-turn, identifiants temporaires signés avec TURN_SECRET.
+      KOZONS_TURN_URL: turn:kozonstic.com:3478?transport=udp,turn:kozonstic.com:3478?transport=tcp
+      KOZONS_TURN_SECRET: ${TURN_SECRET:?TURN_SECRET manquant dans .env}
     volumes:
       # Uploads et statiques : dossiers lus directement par Caddy.
       - /srv/apps/kozons/media:/app/media
@@ -74,6 +77,47 @@ services:
       retries: 5
     networks:
       - kozons
+
+  # Serveur TURN : relaie l'audio/vidéo quand la connexion directe entre deux
+  # appareils est impossible (4G, réseaux d'entreprise…).
+  # Réseau de l'hôte : une plage de ports UDP publiée par Docker serait très lente.
+  # Ports à ouvrir dans UFW : `make firewall`.
+  kozons-turn:
+    image: coturn/coturn:4.6-alpine
+    container_name: kozons-turn
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --realm=kozonstic.com
+      - --listening-port=3478
+      - --listening-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP manquant dans .env}
+      - --relay-ip=${TURN_EXTERNAL_IP}
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --min-port=49160
+      - --max-port=49260
+      # Identifiants temporaires générés par Django (chat/views.py → ice_servers).
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --fingerprint
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --no-tcp-relay
+      - --no-multicast-peers
+      - --no-software-attribute
+      - --stale-nonce=600
+      - --user-quota=12
+      - --total-quota=200
+      # Interdit de relayer vers les réseaux internes (conteneurs Docker, localhost…).
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
 
 volumes:
   pgdata:

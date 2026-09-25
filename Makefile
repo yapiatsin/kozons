@@ -16,6 +16,7 @@ COMPOSE     := docker compose
 WEB         := kozons-web
 DB          := kozons-db
 REDIS       := kozons-redis
+TURN        := kozons-turn
 DJANGO      := $(COMPOSE) exec -T $(WEB) python manage.py
 CADDY       ?= eprinters_caddy
 CADDY_SITE  ?= /opt/caddy-sites/30-kozons.caddy
@@ -23,9 +24,9 @@ SHARED_DIR  ?= /srv/apps/kozons
 HEALTH_URL  ?= http://127.0.0.1:8020/manifest.webmanifest
 
 .PHONY: help rebuild pull build up down restart reload status ps health \
-		logs logs-web logs-db logs-redis kozons-web kozons-db kozons-redis shell dbshell \
+		logs logs-web logs-db logs-redis logs-turn kozons-web kozons-db kozons-redis shell dbshell \
 		migrate migrate-check makemigrations superuser check backup restore \
-		dirs caddy-install caddy-validate caddy-reload caddy-logs prune
+		dirs caddy-install caddy-validate caddy-reload caddy-logs prune firewall
 
 help: ## Affiche cette aide
 	@echo ""
@@ -104,6 +105,9 @@ logs-db: ## Logs de PostgreSQL
 
 logs-redis: ## Logs de Redis
 	$(COMPOSE) logs -f --tail=100 $(REDIS)
+
+logs-turn: ## Logs du serveur TURN (appels)
+	$(COMPOSE) logs -f --tail=100 $(TURN)
 
 caddy-logs: ## Logs du Caddy partagé
 	docker logs -f --tail=100 $(CADDY)
@@ -185,6 +189,12 @@ caddy-validate: ## Vérifie la configuration Caddy complète
 
 caddy-reload: ## Recharge Caddy
 	docker exec $(CADDY) caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+
+firewall: ## Ouvre dans UFW les ports du serveur TURN (à lancer une fois)
+	ufw allow 3478/udp comment 'kozons-turn'
+	ufw allow 3478/tcp comment 'kozons-turn'
+	ufw allow 49160:49260/udp comment 'kozons-turn relais'
+	@ufw status | grep kozons
 
 prune: ## Supprime les images Docker inutilisées
 	docker image prune -f
