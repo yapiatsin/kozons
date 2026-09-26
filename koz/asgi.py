@@ -17,17 +17,6 @@ from django.urls import path  # noqa: E402
 from chat.consumers import KozonsConsumer  # noqa: E402
 
 
-def reset_presence():
-    """Au démarrage, aucune connexion n'est ouverte : remet la présence à zéro."""
-    try:
-        from accounts.models import User
-        User.objects.filter(online_count__gt=0).update(online_count=0)
-    except Exception:
-        pass  # base pas encore migrée
-
-
-reset_presence()
-
 application = ProtocolTypeRouter({
     'http': django_asgi_app,
     'websocket': AllowedHostsOriginValidator(

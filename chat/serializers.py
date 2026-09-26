@@ -75,6 +75,7 @@ def message_data(msg, viewer=None, starred_ids=None, opened_ids=None):
         'story': None if msg.deleted else story_preview(msg.story),
         'contact': None if msg.deleted else user_brief(msg.contact_user),
         'sticker_id': None if msg.deleted else msg.sticker_id,
+        'mentions': [] if msg.deleted else [{'id': u.pk, 'name': u.name, 'username': u.username} for u in msg.mentions.all()],
         'created_at': _iso(msg.created_at),
         'edited_at': _iso(msg.edited_at),
         'expires_at': _iso(msg.expires_at),
@@ -93,7 +94,7 @@ def message_data(msg, viewer=None, starred_ids=None, opened_ids=None):
 
 
 MESSAGE_RELATED = ('sender', 'reply_to__sender', 'shared_post__author', 'story', 'contact_user')
-MESSAGE_PREFETCH = ('reactions', 'poll_options__votes', 'shared_post__media')
+MESSAGE_PREFETCH = ('reactions', 'poll_options__votes', 'shared_post__media', 'mentions')
 
 
 def participant_data(p, viewer=None):
@@ -105,7 +106,7 @@ def participant_data(p, viewer=None):
     }
 
 
-def conversation_data(conv, me_part, viewer, participants, last_message=None, unread=0, blocked=None):
+def conversation_data(conv, me_part, viewer, participants, last_message=None, unread=0, blocked=None, unread_mentions=0):
     return {
         'id': conv.pk,
         'kind': conv.kind,
@@ -129,6 +130,7 @@ def conversation_data(conv, me_part, viewer, participants, last_message=None, un
             'cleared_before_id': me_part.cleared_before_id,
         },
         'unread': unread,
+        'unread_mentions': unread_mentions,
         'last_message': last_message,
         'blocked': blocked or {'by_me': False, 'by_them': False},
     }

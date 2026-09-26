@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { bus, state } from '../store.js';
 import { send } from '../ws.js';
-import { h, clear, icon, btn, avatar, toast, errorToast, ringtone, duration, listTime, empty, spinner, debounce } from '../ui.js';
+import { h, clear, icon, btn, avatar, menu, toast, errorToast, ringtone, duration, listTime, empty, spinner, debounce } from '../ui.js';
 
 let current = null;
 let iceServers = null;
@@ -39,6 +39,7 @@ export async function startCall(peer, video) {
     catch (e2) { return toast('Accès au micro refusé.', { type: 'error' }); }
   }
   current = { role: 'caller', peer, video, localStream: stream, call: null, accepted: true, candidates: [] };
+  initAudio();
   showCallUI('Appel en cours…');
   send('call.start', { to: peer.id, video });
 }
@@ -154,6 +155,7 @@ async function createPeer() {
 async function accept() {
   if (!current) return;
   stopRinging();
+  initAudio();
   let stream;
   try { stream = await getMedia(current.video); }
   catch (e) {
@@ -191,7 +193,132 @@ function cleanup() {
   if (current.pc) try { current.pc.close(); } catch (e) { /* ignoré */ }
   for (const s of [current.localStream, current.screenStream]) if (s) s.getTracks().forEach(t => t.stop());
   if (current.ui) current.ui.remove();
+  if (current.audio) current.audio.ctx.close().catch(() => {});
   current = null;
+}
+
+// ------------------------------------------------------------------ son : amplification et haut-parleur
+
+// Gain appliqué au son de l'interlocuteur. Le compresseur évite la saturation quand on amplifie.
+const VOLUME = { normal: 1.8, speaker: 3.2 };
+
+function initAudio() {
+  if (!current || current.audio) return;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const gain = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -22;
+    comp.knee.value = 12;
+    comp.ratio.value = 5;
+    comp.attack.value = 0.003;
+    comp.release.value = 0.2;
+    gain.connect(comp).connect(ctx.destination);
+    ctx.resume().catch(() => {});
+    current.audio = { ctx, gain, source: null };
+    current.speaker = !!current.video; // appel vidéo : haut-parleur par défaut, comme WhatsApp
+    applyVolume();
+  } catch (e) {
+    current.audio = null; // repli : lecture directe par les éléments <audio>/<video>
+  }
+}
+
+function applyVolume() {
+  if (!current || !current.audio) return;
+  const { ctx, gain } = current.audio;
+  gain.gain.setTargetAtTime(current.speaker ? VOLUME.speaker : VOLUME.normal, ctx.currentTime, 0.05);
+  if (current.els && current.els.speakerBtn) {
+    current.els.speakerBtn.classList.toggle('on', current.speaker);
+    current.els.speakerBtn.setAttribute('aria-pressed', String(current.speaker));
+  }
+}
+
+function routeRemoteAudio() {
+  const a = current.audio;
+  if (!a || a.source || !current.remoteStream || !current.remoteStream.getAudioTracks().length) return;
+  try {
+    a.source = a.ctx.createMediaStreamSource(current.remoteStream);
+    a.source.connect(a.gain);
+    a.ctx.resume().catch(() => {});
+  } catch (e) { current.audio = null; }
+}
+
+async function speakerMenu(anchor) {
+  const ctx = current && current.audio && current.audio.ctx;
+  let outputs = [];
+  if (ctx && typeof ctx.setSinkId === 'function' && navigator.mediaDevices.enumerateDevices) {
+    try { outputs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput' && d.deviceId !== 'default'); }
+    catch (e) { outputs = []; }
+  }
+  const toggle = () => { current.speaker = !current.speaker; applyVolume(); toast(current.speaker ? 'Haut-parleur activé' : 'Haut-parleur désactivé'); };
+  // Une seule sortie audio (cas des téléphones) : simple bascule haut-parleur.
+  if (outputs.length < 2) return toggle();
+  menu(anchor, [
+    { label: (current.speaker ? '✓ ' : '') + 'Haut-parleur (volume fort)', icon: 'volume', action: () => { if (!current.speaker) toggle(); } },
+    { label: (!current.speaker ? '✓ ' : '') + 'Volume normal', icon: 'volume', action: () => { if (current.speaker) toggle(); } },
+    '-',
+    ...outputs.map(d => ({
+      label: (current.audio.sinkId === d.deviceId ? '✓ ' : '') + (d.label || 'Sortie audio'),
+      icon: 'volume',
+      action: async () => {
+        try { await ctx.setSinkId(d.deviceId); current.audio.sinkId = d.deviceId; toast('Sortie : ' + (d.label || 'audio')); }
+        catch (e) { toast('Impossible de changer de sortie audio.', { type: 'error' }); }
+      },
+    })),
+  ]);
+}
+
+// ------------------------------------------------------------------ vidéos : permutation et vignette déplaçable
+
+/** Place les deux vidéos : l'une en plein écran, l'autre en vignette dans un coin. */
+function layoutVideos() {
+  if (!current || !current.els) return;
+  const { remoteVideo, localVideo } = current.els;
+  const remoteOn = !!(current.remoteStream && current.remoteStream.getVideoTracks().length);
+  const localTrack = current.localStream && current.localStream.getVideoTracks()[0];
+  const localOn = !!(localTrack && localTrack.enabled) || !!current.screenStream;
+  const swapped = !!current.swapped && remoteOn && localOn;
+  const [full, pip] = swapped ? [localVideo, remoteVideo] : [remoteVideo, localVideo];
+  const corner = current.pipCorner || 'br';
+  const corners = ['pip-br', 'pip-bl', 'pip-tr', 'pip-tl'];
+  full.classList.remove('pip', ...corners);
+  full.classList.add('full');
+  pip.classList.remove('full', ...corners);
+  pip.classList.add('pip', `pip-${corner}`);
+  pip.title = remoteOn && localOn ? 'Toucher pour permuter · glisser pour déplacer' : '';
+  current.ui.classList.toggle('swapped', swapped);
+}
+
+/** Vignette : un toucher permute les écrans, un glisser la déplace vers le coin le plus proche. */
+function enablePip(video) {
+  let start = null;
+  video.addEventListener('pointerdown', e => {
+    if (!video.classList.contains('pip')) return;
+    start = { x: e.clientX, y: e.clientY, moved: false };
+    video.setPointerCapture(e.pointerId);
+  });
+  video.addEventListener('pointermove', e => {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (Math.abs(dx) + Math.abs(dy) > 6) start.moved = true;
+    if (start.moved) video.style.translate = `${dx}px ${dy}px`;
+  });
+  video.addEventListener('pointerup', e => {
+    if (!start || !current) return;
+    const moved = start.moved;
+    start = null;
+    if (moved) {
+      // Position au moment du lâcher (avant de retirer le décalage du glisser) -> coin le plus proche.
+      const r = video.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      current.pipCorner = (cy < window.innerHeight / 2 ? 't' : 'b') + (cx < window.innerWidth / 2 ? 'l' : 'r');
+      video.style.translate = '';
+    } else {
+      video.style.translate = '';
+      current.swapped = !current.swapped;
+    }
+    layoutVideos();
+  });
 }
 
 function ringback() {
@@ -230,8 +357,11 @@ function showIncomingUI() {
 function showCallUI(status) {
   if (current.ui) current.ui.remove();
   const { peer } = current;
-  const remoteVideo = h('video.remote-video', { autoplay: true, playsinline: true });
-  const remoteAudio = h('audio', { autoplay: true });
+  // Le son passe par l'amplificateur Web Audio : les éléments restent attachés au flux mais muets
+  // (Chrome ne fait circuler l'audio WebRTC vers Web Audio que si le flux est aussi lu par un élément).
+  const routed = !!current.audio;
+  const remoteVideo = h('video.remote-video', { autoplay: true, playsinline: true, muted: routed });
+  const remoteAudio = h('audio', { autoplay: true, muted: routed });
   const localVideo = h('video.local-video', { autoplay: true, playsinline: true, muted: true });
   const statusEl = h('p.call-status', status || '');
   const center = h('div.call-center', avatar(peer.avatar, peer.name, 120), h('h2', peer.name), statusEl);
@@ -268,17 +398,22 @@ function showCallUI(status) {
     camBtn.classList.toggle('off', !t.enabled);
     camBtn.replaceChildren(icon(t.enabled ? 'video' : 'camOff', 24));
     localVideo.classList.toggle('hidden', !t.enabled);
+    layoutVideos();
   };
   const flipBtn = h('button.call-btn', { type: 'button', 'aria-label': 'Changer de caméra', onclick: flipCamera }, icon('flip', 24));
   const screenBtn = navigator.mediaDevices.getDisplayMedia ? h('button.call-btn', { type: 'button', 'aria-label': "Partager l'écran", onclick: toggleScreen }, icon('screen', 24)) : null;
+  const speakerBtn = h('button.call-btn', { type: 'button', 'aria-label': 'Haut-parleur', title: 'Haut-parleur', onclick: e => speakerMenu(e.currentTarget) }, icon('volume', 24));
+  enablePip(remoteVideo);
+  enablePip(localVideo);
 
   current.ui = h('div.call-screen' + (current.video ? '.video' : ''),
     remoteVideo, remoteAudio, center, localVideo,
     h('div.call-top', h('span', icon('lock', 14), ' Appel privé Kozons')),
-    h('div.call-controls', micBtn, camBtn, flipBtn, screenBtn,
+    h('div.call-controls', speakerBtn, micBtn, camBtn, flipBtn, screenBtn,
       h('button.call-btn.hangup', { type: 'button', onclick: hangup, 'aria-label': 'Raccrocher' }, icon('phoneOff', 28))));
-  current.els = { remoteVideo, remoteAudio, localVideo, statusEl, center };
+  current.els = { remoteVideo, remoteAudio, localVideo, statusEl, center, speakerBtn };
   document.getElementById('overlay-root').appendChild(current.ui);
+  applyVolume();
   attachStreams();
 }
 
@@ -290,10 +425,18 @@ function attachStreams() {
   if (current.remoteStream) {
     const hasVideo = current.remoteStream.getVideoTracks().length > 0;
     if (hasVideo && remoteVideo.srcObject !== current.remoteStream) remoteVideo.srcObject = current.remoteStream;
-    if (!hasVideo && remoteAudio.srcObject !== current.remoteStream) remoteAudio.srcObject = current.remoteStream;
     current.ui.classList.toggle('has-remote-video', hasVideo);
-    if (hasVideo) remoteAudio.srcObject = null;
+    if (current.audio) {
+      if (remoteAudio.srcObject !== current.remoteStream) remoteAudio.srcObject = current.remoteStream;
+      routeRemoteAudio();
+    } else {
+      // Repli sans Web Audio : un seul élément lit le son, au volume maximal.
+      if (!hasVideo && remoteAudio.srcObject !== current.remoteStream) remoteAudio.srcObject = current.remoteStream;
+      if (hasVideo) remoteAudio.srcObject = null;
+      remoteVideo.volume = remoteAudio.volume = 1;
+    }
   }
+  layoutVideos();
 }
 
 function setStatus(text) {
@@ -333,6 +476,7 @@ async function toggleScreen() {
     current.screenStream.getTracks().forEach(t => t.stop());
     current.screenStream = null;
     current.els.localVideo.srcObject = current.localStream;
+    layoutVideos();
     return;
   }
   try {
@@ -344,6 +488,7 @@ async function toggleScreen() {
     current.screenStream = s;
     await replaceVideoTrack(track);
     current.els.localVideo.srcObject = s;
+    layoutVideos();
     track.onended = () => current && current.screenStream && toggleScreen();
   } catch (e) { /* annulé */ }
 }

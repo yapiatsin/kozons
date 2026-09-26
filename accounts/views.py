@@ -372,3 +372,67 @@ def toggle_block(request, user_id):
 def blocked_list(request):
     blocks = Block.objects.filter(blocker=request.user).select_related('blocked')
     return {'results': [user_brief(b.blocked, request.user) for b in blocks]}
+
+
+# ---------------------------------------------------------------- Notifications push
+
+@api(['GET'], auth=False)
+def push_key(request):
+    """Clé publique VAPID dont le navigateur a besoin pour s'abonner."""
+    from .push import enabled
+    return {'enabled': enabled(), 'public_key': settings.VAPID_PUBLIC_KEY if enabled() else None}
+
+
+@api(['POST'])
+def push_subscribe(request):
+    """Enregistre l'abonnement Web Push de cet appareil (appelé à chaque ouverture : idempotent)."""
+    from .models import PushSubscription
+    rate_limit(request, 'push-subscribe', 30, 3600)
+    data = body(request)
+    endpoint = (data.get('endpoint') or '').strip()
+    keys = data.get('keys') or {}
+    if not endpoint.startswith('https://') or not keys.get('p256dh') or not keys.get('auth'):
+        raise ApiError('Abonnement push invalide.')
+    PushSubscription.objects.update_or_create(endpoint=endpoint[:1000], defaults={
+        'user': request.user, 'p256dh': keys['p256dh'][:200], 'auth': keys['auth'][:100],
+        'user_agent': request.META.get('HTTP_USER_AGENT', '')[:300], 'failures': 0,
+        'session_key': request.session.session_key or '', 'last_active_at': timezone.now(),
+    })
+    return {'ok': True}
+
+
+@api(['POST'], auth=False)
+def push_unsubscribe(request):
+    """Désabonne cet appareil (déconnexion) : il ne recevra plus les notifications du compte."""
+    from .models import PushSubscription
+    endpoint = (body(request).get('endpoint') or '').strip()
+    qs = PushSubscription.objects.filter(endpoint=endpoint)
+    if request.user.is_authenticated:
+        qs = qs.filter(user=request.user)
+    qs.delete()
+    return {'ok': True}
+
+
+@api(['POST'])
+def presence_heartbeat(request):
+    """Signal d'activité (toutes les quelques minutes tant que l'utilisateur est présent) :
+    prolonge la session via IdleLogoutMiddleware."""
+    return {'ok': True, 'idle_logout_minutes': settings.IDLE_LOGOUT_MINUTES}
+
+
+@api(['POST'])
+def push_test(request):
+    """Envoie une notification de test à tous les appareils de l'utilisateur."""
+    from .models import PushSubscription
+    from .push import enabled, send_to_users
+    if not enabled():
+        raise ApiError('Les notifications push ne sont pas configurées sur le serveur (clés VAPID).', 503)
+    count = PushSubscription.objects.filter(user=request.user).count()
+    if not count:
+        raise ApiError("Aucun appareil abonné. Activez d'abord les notifications.")
+    rate_limit(request, 'push-test', 5, 300)
+    send_to_users([request.user.pk], {
+        'kind': 'test', 'title': 'Kozons', 'body': 'Les notifications fonctionnent sur cet appareil 🎉',
+        'url': '/settings', 'tag': 'test',
+    }, ttl=600, only_offline=False)
+    return {'devices': count}

@@ -105,7 +105,7 @@ function body(msg, ctx) {
     return h('div.text.deleted', icon('block', 14), msg.sender_id === state.me.id ? 'Vous avez supprimé ce message' : 'Ce message a été supprimé');
   }
   const caption = msg.text && msg.kind !== 'text' && msg.kind !== 'poll' && msg.kind !== 'story_reply'
-    ? h('div.text.caption', richText(msg.text)) : null;
+    ? h('div.text.caption', textWithMentions(msg.text, msg.mentions)) : null;
 
   if (msg.view_once) return viewOnce(msg);
 
@@ -166,8 +166,32 @@ function body(msg, ctx) {
         msg.text ? h('div.text', richText(msg.text)) : null);
     }
     default:
-      return h('div.text', richText(msg.text || ''));
+      return h('div.text', textWithMentions(msg.text || '', msg.mentions));
   }
+}
+
+/** Texte d'un message avec les mentions « @Nom » en bleu (cliquables vers le profil). */
+function textWithMentions(text, mentions) {
+  if (!mentions || !mentions.length) return richText(text);
+  const sorted = [...mentions].sort((a, b) => b.name.length - a.name.length);
+  const frag = document.createDocumentFragment();
+  let buf = '';
+  for (let i = 0; i < text.length;) {
+    const m = text[i] === '@' && sorted.find(t => text.startsWith('@' + t.name, i));
+    if (m) {
+      if (buf) { frag.appendChild(richText(buf)); buf = ''; }
+      frag.appendChild(h('a.mention-tag' + (m.id === state.me.id ? '.me' : ''), {
+        href: '/u/' + m.username,
+        onclick: e => { e.preventDefault(); e.stopPropagation(); window.kozons.go('/u/' + m.username); },
+      }, '@' + m.name));
+      i += m.name.length + 1;
+    } else {
+      buf += text[i];
+      i++;
+    }
+  }
+  if (buf) frag.appendChild(richText(buf));
+  return frag;
 }
 
 function viewOnce(msg) {

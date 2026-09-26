@@ -42,6 +42,7 @@ def app(request):
         'import_map': json.dumps(import_map),
         'css_url': assets.get('css/app.css', static('kozons/css/app.css')),
         'app_js_url': assets.get('js/app.js', static('kozons/js/app.js')),
+        'idle_logout_minutes': settings.IDLE_LOGOUT_MINUTES,
     })
 
 
@@ -53,21 +54,18 @@ def manifest(request):
         'display': 'standalone',
         'background_color': '#0b141a',
         'theme_color': '#0099cc',
-        'icons': [{'src': static('kozons/icon.svg'), 'sizes': 'any', 'type': 'image/svg+xml'}],
+        'icons': [
+            {'src': static('kozons/icon-192.png'), 'sizes': '192x192', 'type': 'image/png'},
+            {'src': static('kozons/icon-512.png'), 'sizes': '512x512', 'type': 'image/png'},
+            {'src': static('kozons/icon-512.png'), 'sizes': '512x512', 'type': 'image/png', 'purpose': 'maskable'},
+            {'src': static('kozons/icon.svg'), 'sizes': 'any', 'type': 'image/svg+xml'},
+        ],
     })
 
 
 def service_worker(request):
-    """Service worker minimal : permet l'installation (PWA) et les notifications."""
-    js = """
-self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  e.waitUntil(self.clients.matchAll({type: 'window'}).then(list => {
-    for (const c of list) { c.focus(); c.postMessage({type: 'open', url: e.notification.data && e.notification.data.url}); return; }
-    return self.clients.openWindow((e.notification.data && e.notification.data.url) || '/');
-  }));
-});
-"""
-    return HttpResponse(js, content_type='application/javascript')
+    """Service worker : installation (PWA) et réception des notifications push, application fermée."""
+    response = render(request, 'kozons/sw.js', content_type='application/javascript')
+    response['Service-Worker-Allowed'] = '/'
+    response['Cache-Control'] = 'no-cache'  # les mises à jour du worker sont prises en compte aussitôt
+    return response

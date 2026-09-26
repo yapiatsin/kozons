@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kozons",
+      "runtimeExecutable": "C:\\Users\\BRADY\\Kozons\\env\\Scripts\\python.exe",
+      "runtimeArgs": ["manage.py", "runserver", "127.0.0.1:8030"],
+      "port": 8030
+    }
+  ]
+}

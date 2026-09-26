@@ -1,4 +1,5 @@
 // Client HTTP de l'API Kozons (session + CSRF).
+import { isActive } from './activity.js';
 
 function csrfToken() {
   const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
@@ -10,7 +11,8 @@ export class ApiError extends Error {
 }
 
 async function request(method, url, data, { onProgress } = {}) {
-  const headers = { 'X-CSRFToken': csrfToken() };
+  // X-Kozons-Active : seules les requêtes faites en présence de l'utilisateur prolongent la session.
+  const headers = { 'X-CSRFToken': csrfToken(), 'X-Kozons-Active': isActive() ? '1' : '0' };
   let payload;
   if (data instanceof FormData) {
     payload = data;

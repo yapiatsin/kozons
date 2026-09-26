@@ -13,7 +13,10 @@ export function storiesBar() {
   const bar = h('div.stories-bar', spinner(24));
   const load = async () => {
     try {
-      const groups = await fetchStories();
+      const [groups, lives] = await Promise.all([
+        fetchStories(),
+        api.get('live').then(r => r.results.filter(l => !l.is_host)).catch(() => []),
+      ]);
       const mine = groups.find(g => g.is_me);
       const others = groups.filter(g => !g.is_me);
       clear(bar,
@@ -21,6 +24,9 @@ export function storiesBar() {
           h('div.story-avatar-wrap', avatar(state.me.avatar, state.me.name, 62, { ring: mine ? (mine.all_seen ? 'seen' : 'new') : null }),
             !mine ? h('span.story-add', icon('plus', 14)) : null),
           h('span', 'Votre story')),
+        lives.map(l => h('button.story-bubble.is-live', { type: 'button', onclick: () => window.kozons.go('/live/' + l.id) },
+          h('div.story-avatar-wrap', avatar(l.host.avatar, l.host.name, 62, { ring: 'live' }), h('span.story-live-tag', 'LIVE')),
+          h('span', l.host.username))),
         others.map(g => h('button.story-bubble', { type: 'button', onclick: () => openViewer(groups, groups.indexOf(g), load) },
           avatar(g.user.avatar, g.user.name, 62, { ring: g.all_seen ? 'seen' : 'new' }),
           h('span', g.user.username))));

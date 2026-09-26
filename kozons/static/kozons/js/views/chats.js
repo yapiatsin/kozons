@@ -15,6 +15,7 @@ import {
 } from './dialogs.js';
 import { renderInfo } from './chatinfo.js';
 import { stickerPanel, stickerActionsDialog, loadStickers } from './stickerpanel.js';
+import { mentionInput } from './mentions.js';
 import { startCall } from './calls.js';
 
 let root, listEl, paneEl, infoEl, searchInput;
@@ -175,6 +176,7 @@ function chatItem(conv) {
         conv.disappearing_seconds ? icon('timer', 16) : null,
         isMuted(conv) ? icon('bellOff', 16) : null,
         conv.me.pinned ? icon('pin', 16) : null,
+        conv.unread_mentions > 0 ? h('span.mention-badge', { title: 'Vous avez été mentionné(e)' }, '@') : null,
         conv.unread > 0 ? h('span.unread-badge' + (isMuted(conv) ? '.muted-badge' : ''), conv.unread > 999 ? '999+' : String(conv.unread))
           : conv.me.marked_unread ? h('span.unread-badge.dot') : null,
         h('button.item-menu', { type: 'button', 'aria-label': 'Options', onclick: e => { e.preventDefault(); e.stopPropagation(); chatMenu(conv, e.currentTarget); } }, icon('arrowDown', 18))))));
@@ -621,7 +623,13 @@ function updateComposerState() {
 function buildComposer() {
   const { composer } = pane;
   const input = h('textarea.composer-input', { rows: 1, placeholder: 'Écrire un message', 'aria-label': 'Message' });
-  const resize = autoGrow(input, 140);
+  const baseResize = autoGrow(input, 140);
+  // Mentions « @membre » (groupes uniquement).
+  const mention = mentionInput(input, {
+    members: () => (pane ? pane.conv.participants.map(p => p.user).filter(u => u.id !== state.me.id) : []),
+    enabled: () => !!pane && pane.conv.kind === 'group',
+  });
+  const resize = () => { baseResize(); mention.refresh(); };
   const emojiTab = emojiPicker(e => {
     const s = input.selectionStart ?? input.value.length;
     input.value = input.value.slice(0, s) + e + input.value.slice(input.selectionEnd ?? s);
@@ -684,12 +692,16 @@ function buildComposer() {
     }
     if (!text) return startRecording();
     const reply = pane.replyTo;
-    input.value = ''; resize(); toggleSend();
+    const mentions = mention.list();
+    input.value = ''; mention.clear(); resize(); toggleSend();
     setReply(null);
     sendTyping('stop');
     emojiPanel.classList.add('hidden');
     // Messages très longs : découpés comme WhatsApp (65 536 caractères max).
-    sendMessage(pane.convId, { kind: 'text', text, reply_to: reply && reply.id, reply_preview: reply && quotePreview(reply) }).catch(e => errorToast(e));
+    sendMessage(pane.convId, {
+      kind: 'text', text, reply_to: reply && reply.id, reply_preview: reply && quotePreview(reply),
+      mentions: mentions.length ? mentions.map(m => m.id) : undefined, mention_preview: mentions,
+    }).catch(e => errorToast(e));
   };
   sendBtn.onclick = submit;
 
@@ -730,7 +742,7 @@ function buildComposer() {
     pane.cleanup.push(() => pane.removePickerListeners && pane.removePickerListeners());
   }
 
-  clear(composer, emojiPanel, topBar, h('div.composer-row', emojiBtn, attach, h('div.composer-field', input), sendBtn));
+  clear(composer, emojiPanel, mention.picker, topBar, h('div.composer-row', emojiBtn, attach, h('div.composer-field', mention.field), sendBtn));
   updateComposerState();
 }
 

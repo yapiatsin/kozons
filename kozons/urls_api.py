@@ -3,6 +3,7 @@ from django.urls import path
 from accounts import views as accounts
 from chat import stickers
 from chat import views as chat
+from live import views as live
 from social import views as social
 
 urlpatterns = [
@@ -17,6 +18,11 @@ urlpatterns = [
     path('auth/password/verify', accounts.password_verify),
     path('auth/password/reset', accounts.password_reset),
     path('me', accounts.me),
+    path('presence/heartbeat', accounts.presence_heartbeat),
+    path('push/key', accounts.push_key),
+    path('push/subscribe', accounts.push_subscribe),
+    path('push/unsubscribe', accounts.push_unsubscribe),
+    path('push/test', accounts.push_test),
     path('users/search', accounts.search_users),
     path('users/blocked', accounts.blocked_list),
     path('users/<int:user_id>/block', accounts.toggle_block),
@@ -56,6 +62,13 @@ urlpatterns = [
     path('stickers/<int:pk>', stickers.sticker_action),
     path('calls', chat.call_history),
     path('calls/ice', chat.ice_servers),
+
+    # Lives
+    path('live', live.lives),
+    path('live/media-auth', live.media_auth),
+    path('live/<int:pk>', live.live_detail),
+    path('live/<int:pk>/end', live.live_end),
+    path('live/<int:pk>/viewers', live.live_viewers),
 
     # Social
     path('feed', social.feed),

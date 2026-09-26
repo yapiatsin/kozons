@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 from django.db import transaction
-from django.db.models import Count, F, OuterRef, Prefetch, Subquery
+from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -84,6 +84,13 @@ def conversations_for(user, only_ids=None):
         .exclude(expires_at__lte=now)
         .values('conversation_id').annotate(n=Count('id')).values_list('conversation_id', 'n')
     )
+    # Mentions non lues (badge « @ » dans la liste des discussions).
+    unread_mentions = dict(
+        Message.objects.filter(conversation_id__in=conv_ids, conversation__participants__user=user,
+                               id__gt=F('conversation__participants__last_read_id'), mentions=user)
+        .exclude(deleted=True).exclude(expires_at__lte=now)
+        .values('conversation_id').annotate(n=Count('id', distinct=True)).values_list('conversation_id', 'n')
+    )
     last_ids = [p.last_id for p in parts if p.last_id]
     messages = {m.pk: m for m in load_messages(Message.objects.filter(pk__in=last_ids))}
     serialized = {d['id']: d for d in serialize_messages(list(messages.values()), user)}
@@ -102,7 +109,7 @@ def conversations_for(user, only_ids=None):
             if peer:
                 blocked = {'by_me': peer.user_id in blocks, 'by_them': peer.user_id in blocked_by}
         result.append(conversation_data(conv, p, user, members, serialized.get(p.last_id),
-                                        unread.get(conv.pk, 0), blocked))
+                                        unread.get(conv.pk, 0), blocked, unread_mentions.get(conv.pk, 0)))
     result.sort(key=lambda c: (c['me']['pinned'], (c['last_message'] or {}).get('created_at') or c['updated_at']), reverse=True)
     return result
 
@@ -126,19 +133,69 @@ def broadcast_conversation(conversation):
     transaction.on_commit(send)
 
 
-def create_message(conversation, sender, **fields):
-    """Crée un message, met à jour la discussion et le diffuse à tous les membres."""
+def create_message(conversation, sender, mentions=None, **fields):
+    """Crée un message, met à jour la discussion et le diffuse à tous les membres.
+    `mentions` : ids des membres mentionnés (déjà validés)."""
     if conversation.disappearing_seconds and fields.get('kind') != 'system':
         fields['expires_at'] = timezone.now() + timedelta(seconds=conversation.disappearing_seconds)
     with transaction.atomic():
         msg = Message.objects.create(conversation=conversation, sender=sender, **fields)
+        if mentions:
+            msg.mentions.set(mentions)
         Conversation.objects.filter(pk=conversation.pk).update(updated_at=msg.created_at)
         if sender is not None:
             Participant.objects.filter(conversation=conversation, user=sender).update(
                 last_read_id=msg.pk, last_delivered_id=msg.pk, marked_unread=False)
         msg = load_messages(Message.objects.filter(pk=msg.pk)).get()
         push(member_ids(conversation), 'message.new', message_data(msg))
+        push_new_message(msg)
     return msg
+
+
+PUSH_LABELS = {
+    'image': '📷 Photo', 'video': '🎥 Vidéo', 'audio': '🎵 Audio', 'voice': '🎤 Message vocal',
+    'file': '📄 Document', 'sticker': 'Sticker', 'location': '📍 Position', 'contact': '👤 Contact',
+    'post': '🖼️ Publication', 'story_reply': '↩️ A répondu à votre story',
+}
+
+
+def push_preview(msg):
+    if msg.view_once:
+        return '① Média à vue unique'
+    if msg.kind == 'poll':
+        return '📊 ' + msg.text
+    label = PUSH_LABELS.get(msg.kind)
+    if label and msg.text and msg.kind in ('image', 'video', 'file', 'story_reply'):
+        return f'{label.split(" ")[0]} {msg.text}'
+    return label or msg.text
+
+
+def push_new_message(msg):
+    """Notification push aux membres hors ligne (discussions en sourdine exclues, sauf pour
+    les membres mentionnés, comme sur WhatsApp)."""
+    from accounts.push import send_to_users
+    if msg.kind == 'system' or msg.sender is None:
+        return
+    conv = msg.conversation
+    now = timezone.now()
+    mentioned = {u.pk for u in msg.mentions.all()}
+    recipients = set(Participant.objects.filter(conversation=conv).exclude(user_id=msg.sender_id)
+                     .filter(Q(muted_until__isnull=True) | Q(muted_until__lte=now))
+                     .values_list('user_id', flat=True)) - mentioned
+    preview = push_preview(msg)[:180]
+    sender = msg.sender
+    base = {
+        'kind': 'message',
+        'title': conv.title if conv.is_group else sender.name,
+        'icon': (conv.avatar.url if conv.is_group and conv.avatar else sender.avatar.url if sender.avatar else None),
+        'url': f'/chats/{conv.pk}',
+        'tag': f'conv-{conv.pk}',
+    }
+    send_to_users(recipients, {**base, 'body': f'{sender.name} : {preview}' if conv.is_group else preview},
+                  topic=f'conv-{conv.pk}')
+    if mentioned:
+        send_to_users(mentioned, {**base, 'body': f'{sender.name} vous a mentionné(e) : {preview}'},
+                      topic=f'conv-{conv.pk}')
 
 
 def system_message(conversation, actor, text):

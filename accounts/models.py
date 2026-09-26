@@ -20,7 +20,6 @@ class User(AbstractUser):
 
     # Présence
     last_seen = models.DateTimeField(null=True, blank=True)
-    online_count = models.PositiveIntegerField(default=0)
 
     # Confidentialité
     last_seen_visibility = models.CharField(max_length=10, choices=VISIBILITY, default='everyone')
@@ -33,7 +32,9 @@ class User(AbstractUser):
 
     @property
     def is_online(self):
-        return self.online_count > 0
+        """Présent sur la plateforme (onglet visible et actif), pas seulement connecté."""
+        from .presence import is_online
+        return is_online(self.pk)
 
 
 class Block(models.Model):
@@ -77,3 +78,19 @@ class OneTimeCode(models.Model):
     @property
     def is_active(self):
         return self.used_at is None and timezone.now() < self.expires_at
+
+
+class PushSubscription(models.Model):
+    """Abonnement Web Push d'un navigateur / appareil (un utilisateur peut en avoir plusieurs)."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='push_subscriptions')
+    endpoint = models.URLField(max_length=1000, unique=True)
+    p256dh = models.CharField(max_length=200)
+    auth = models.CharField(max_length=100)
+    user_agent = models.CharField(max_length=300, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    failures = models.PositiveSmallIntegerField(default=0)
+    # Session de l'appareil et dernière activité : au-delà de la déconnexion automatique pour
+    # inactivité, les notifications ne montrent plus le contenu (« Nouveau message »).
+    session_key = models.CharField(max_length=40, blank=True, db_index=True)
+    last_active_at = models.DateTimeField(null=True, blank=True)

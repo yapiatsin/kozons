@@ -297,9 +297,24 @@ def send_message(request, part):
             Participant.objects.filter(pk=part.pk).update(last_read_id=msg.pk, last_delivered_id=msg.pk)
             msg = svc.load_messages(Message.objects.filter(pk=msg.pk)).get()
             push(svc.member_ids(conv), 'message.new', message_data(msg))
+            svc.push_new_message(msg)
         else:
-            msg = svc.create_message(conv, request.user, **fields)
+            msg = svc.create_message(conv, request.user, mentions=_mentions(data, conv, request.user), **fields)
     return svc.serialize_messages([msg], request.user)[0]
+
+
+def _mentions(data, conv, sender):
+    """Ids mentionnés valides : membres du groupe (hors expéditeur). Ignoré hors des groupes."""
+    if not conv.is_group:
+        return []
+    raw = data.getlist('mentions') if hasattr(data, 'getlist') else data.get('mentions') or []
+    if isinstance(raw, str):
+        raw = raw.split(',')
+    ids = {i for i in (as_int(x) for x in raw) if i}
+    if not ids:
+        return []
+    return list(Participant.objects.filter(conversation=conv, user_id__in=ids)
+                .exclude(user=sender).values_list('user_id', flat=True))
 
 
 def _own_message(request, pk):

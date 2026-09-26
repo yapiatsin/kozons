@@ -21,6 +21,11 @@ kozonstic.com {
 		-Server
 	}
 
+	# LIVE : négociation WebRTC (WHIP/WHEP) avec le serveur média kozons-live.
+	handle_path /live-media/* {
+		reverse_proxy kozons-live:8889
+	}
+
 	# Fichiers statiques (collectstatic) — URLs versionnées par ?v=, cache long.
 	handle_path /static/* {
 		root * /srv/apps/kozons/static

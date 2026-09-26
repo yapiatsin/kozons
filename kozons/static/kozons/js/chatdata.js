@@ -91,6 +91,7 @@ export function markRead(convId) {
   if (!last) return;
   if (conv.unread === 0 && !conv.me.marked_unread && conv.me.last_read_id >= last.id) return;
   conv.unread = 0;
+  conv.unread_mentions = 0;
   conv.me.marked_unread = false;
   conv.me.last_read_id = Math.max(conv.me.last_read_id, last.id);
   bus.emit('conversations:changed', convId);
@@ -107,7 +108,7 @@ export async function sendMessage(convId, fields, { file, onProgress } = {}) {
     kind: fields.kind || 'text', text: fields.text || '', file: file ? URL.createObjectURL(file) : (fields.preview_url || null),
     file_name: file ? file.name : '', file_size: file ? file.size : 0, duration: fields.duration || 0,
     reply_to: fields.reply_preview || null, created_at: new Date().toISOString(), reactions: [],
-    pending: true, progress: 0, view_once: !!fields.view_once,
+    pending: true, progress: 0, view_once: !!fields.view_once, mentions: fields.mention_preview || [],
     latitude: fields.latitude, longitude: fields.longitude,
   };
   if (file && !fields.kind) {
@@ -119,7 +120,7 @@ export async function sendMessage(convId, fields, { file, onProgress } = {}) {
 
   const payload = new FormData();
   for (const [k, v] of Object.entries(fields)) {
-    if (k === 'reply_preview' || k === 'preview_url' || v === undefined || v === null) continue;
+    if (k === 'reply_preview' || k === 'preview_url' || k === 'mention_preview' || v === undefined || v === null) continue;
     if (Array.isArray(v)) v.forEach(x => payload.append(k, x));
     else payload.append(k, typeof v === 'boolean' ? (v ? '1' : '0') : v);
   }
@@ -172,6 +173,7 @@ export function installRealtime(notify) {
         markRead(msg.conversation_id);
       } else {
         conv.unread = (conv.unread || 0) + 1;
+        if ((msg.mentions || []).some(m => m.id === state.me.id)) conv.unread_mentions = (conv.unread_mentions || 0) + 1;
         if (!isMuted(conv)) notify(conv, msg);
       }
       clearTyping(msg.conversation_id, msg.sender_id);
@@ -213,7 +215,7 @@ export function installRealtime(notify) {
   bus.on('conversation.update', conv => upsertConversation(conv));
   bus.on('conversation.read', ({ conversation_id, last_read_id }) => {
     const conv = state.conversations.get(conversation_id);
-    if (conv) { conv.unread = 0; conv.me.last_read_id = last_read_id; conv.me.marked_unread = false; bus.emit('conversations:changed', conversation_id); }
+    if (conv) { conv.unread = 0; conv.unread_mentions = 0; conv.me.last_read_id = last_read_id; conv.me.marked_unread = false; bus.emit('conversations:changed', conversation_id); }
   });
   bus.on('conversation.removed', ({ conversation_id }) => {
     state.conversations.delete(conversation_id);

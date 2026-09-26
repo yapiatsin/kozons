@@ -119,6 +119,27 @@ services:
       - --denied-peer-ip=172.16.0.0-172.31.255.255
       - --denied-peer-ip=192.168.0.0-192.168.255.255
 
+  # Serveur média des LIVE : l'animateur envoie un seul flux, redistribué à tous les
+  # spectateurs (WebRTC WHIP/WHEP). Autorisations vérifiées par Django (kozons-web).
+  # Port à ouvrir dans UFW : `make firewall` (8189 UDP/TCP).
+  kozons-live:
+    image: bluenviron/mediamtx:1.9.3
+    container_name: kozons-live
+    restart: unless-stopped
+    depends_on:
+      - kozons-web
+    volumes:
+      - ./docker/mediamtx.yml:/mediamtx.yml:ro
+    environment:
+      # IP publique annoncée aux navigateurs pour les flux vidéo.
+      MTX_WEBRTCADDITIONALHOSTS: ${TURN_EXTERNAL_IP}
+    ports:
+      - "8189:8189/udp"
+      - "8189:8189/tcp"
+    networks:
+      - kozons   # joint kozons-web pour les autorisations
+      - caddy    # joint par Caddy (/live-media/)
+
 volumes:
   pgdata:
 

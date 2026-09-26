@@ -4,6 +4,7 @@ import { state, prefs, convTitle } from '../store.js';
 import { h, clear, icon, avatar, toast, errorToast, pickFiles, spinner, empty, listTime } from '../ui.js';
 import { previewText } from '../chatdata.js';
 import { passwordInput, passwordChecklist, passwordIsValid } from './auth.js';
+import { pushSupport, enablePush } from '../push.js';
 
 export function render(stage, params) {
   if (params.starred) return renderStarred(stage);
@@ -41,7 +42,7 @@ function build(page) {
   };
   const fields = [
     field('Nom', 'display_name', { max: 64, placeholder: 'Votre nom' }),
-    field('Infos (statut WhatsApp)', 'about', { max: 140 }),
+    field('Infos', 'about', { max: 140 }),
     field('Bio', 'bio', { multiline: true, max: 500 }),
     field('Site web', 'website', { max: 200, placeholder: 'https://' }),
     field('Téléphone', 'phone', { max: 32 }),
@@ -87,12 +88,34 @@ function build(page) {
         [['default', 'Motif Kozons'], ['none', 'Uni']].map(([v, l]) => h('option', { value: v, selected: wallpaper === v }, l)))));
 
   // --- Notifications
-  const perm = 'Notification' in window ? Notification.permission : 'unsupported';
+  const perm = pushSupport();
+  const labels = {
+    granted: 'Activées : messages, appels et activité vous sont notifiés même quand Kozons est fermé.',
+    denied: 'Bloquées. Autorisez les notifications pour ce site dans les réglages du navigateur (icône 🔒 à gauche de l\'adresse).',
+    default: 'Non activées sur cet appareil.',
+    unsupported: 'Non prises en charge par ce navigateur. Sur iPhone : ajoutez Kozons à l\'écran d\'accueil (Partager → Sur l\'écran d\'accueil).',
+    insecure: 'Nécessitent une connexion sécurisée (HTTPS).',
+  };
   const notifs = h('div.settings-card',
     h('h3', 'Notifications'),
-    h('div.info-row', icon('bell'), h('div.grow', h('div', 'Notifications du navigateur'),
-      h('div.muted.small', { granted: 'Activées', denied: 'Bloquées dans les réglages du navigateur', default: 'Non activées', unsupported: 'Non prises en charge' }[perm])),
-    perm === 'default' ? h('button.btn.primary.small', { onclick: () => Notification.requestPermission().then(() => build(page)) }, 'Activer') : null));
+    h('div.info-row', icon('bell'), h('div.grow', h('div', 'Notifications push'), h('div.muted.small', labels[perm] || '')),
+      perm === 'default' ? h('button.btn.primary.small', {
+        onclick: async () => {
+          const result = await enablePush();
+          if (result === 'granted') toast('Notifications activées sur cet appareil');
+          else if (result === 'error') toast("Impossible d'activer les notifications.", { type: 'error' });
+          build(page);
+        },
+      }, 'Activer') : null,
+      perm === 'granted' ? h('button.btn.ghost.small', {
+        onclick: async () => {
+          try {
+            await enablePush(); // s'assure que cet appareil est bien enregistré
+            const { devices } = await api.post('push/test');
+            toast(`Notification de test envoyée à ${devices} appareil${devices > 1 ? 's' : ''}`);
+          } catch (e) { errorToast(e); }
+        },
+      }, 'Tester') : null));
 
   // --- Comptes bloqués
   const blockedList = h('div', spinner(20));

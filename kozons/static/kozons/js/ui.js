@@ -49,7 +49,7 @@ const COLORS = ['#0099cc', '#e1306c', '#7c4dff', '#ff9800', '#03a9f4', '#8bc34a'
 
 export function avatar(src, name = '?', size = 40, opts = {}) {
   const el = h('div.avatar', { style: { width: size + 'px', height: size + 'px', fontSize: Math.round(size * 0.4) + 'px' } });
-  if (opts.ring) el.classList.add('ring', opts.ring === 'seen' ? 'ring-seen' : 'ring-new');
+  if (opts.ring) el.classList.add('ring', opts.ring === 'seen' ? 'ring-seen' : opts.ring === 'live' ? 'ring-live' : 'ring-new');
   if (src) {
     el.appendChild(h('img', { src, alt: '', loading: 'lazy', draggable: 'false' }));
   } else if (opts.group) {

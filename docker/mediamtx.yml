@@ -1,0 +1,41 @@
+# Serveur média des LIVE (kozons-live, image bluenviron/mediamtx:1.9.3).
+# L'animateur publie en WebRTC (WHIP), les spectateurs lisent en WebRTC (WHEP) :
+# un seul flux montant pour l'animateur, quel que soit le nombre de spectateurs.
+# Chaque publication / lecture est autorisée par Django (jeton signé, voir live/services.py).
+
+logLevel: info
+logDestinations: [stdout]
+
+# Seul le WebRTC est utilisé : tout le reste est désactivé.
+api: no
+metrics: no
+pprof: no
+playback: no
+rtsp: no
+rtmp: no
+hls: no
+srt: no
+
+webrtc: yes
+webrtcAddress: :8889            # HTTP (WHIP/WHEP), joint par Caddy sur le réseau `web`
+webrtcEncryption: no            # le TLS est assuré par Caddy
+webrtcAllowOrigin: 'https://kozonstic.com'
+webrtcTrustedProxies: []
+webrtcLocalUDPAddress: :8189    # médias : port unique publié par Docker (make firewall)
+webrtcLocalTCPAddress: :8189    # repli TCP pour les réseaux qui bloquent l'UDP
+webrtcIPsFromInterfaces: no
+# Adresse publique annoncée aux navigateurs : MTX_WEBRTCADDITIONALHOSTS (docker-compose).
+webrtcAdditionalHosts: []
+webrtcICEServers2: []
+
+# Autorisation déléguée à Django : 200 = autorisé, 401 = refusé.
+authMethod: http
+authHTTPAddress: http://kozons-web:8000/api/live/media-auth
+authHTTPExclude: []
+
+pathDefaults:
+  # Aucune diffusion sans animateur connecté ; rien n'est enregistré sur disque.
+  record: no
+
+paths:
+  all_others:

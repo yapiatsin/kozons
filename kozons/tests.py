@@ -12,6 +12,7 @@ from PIL import Image
 from accounts.models import Block, OneTimeCode, User
 from chat.models import (Call, Conversation, HiddenMessage, Message, Participant, PollOption, PollVote, Reaction,
                          StarredMessage, Sticker, UserSticker, ViewOnceOpened)
+from live.models import LiveBan, LiveComment, LiveGift, LiveStream, LiveViewer
 from social.models import (CloseFriend, Comment, CommentLike, Follow, Like, Notification, Post, PostMedia, SavedPost,
                            Story, StoryView)
 
@@ -76,10 +77,17 @@ class AdminPagesTests(TestCase):
         Story.objects.create(user=a, kind='image', file=image(), expires_at=now - timedelta(hours=1))
         StoryView.objects.create(story=story, user=b, liked=True)
         Notification.objects.create(recipient=a, actor=b, verb='comment', post=post, comment=comment)
+        live = LiveStream.objects.create(host=a, title='Soirée live', likes_count=1200)
+        LiveStream.objects.create(host=b, status='ended', ended_at=now)
+        LiveViewer.objects.create(live=live, user=b)
+        first = LiveComment.objects.create(live=live, user=b, text='Salut !')
+        LiveComment.objects.create(live=live, user=a, text='Bienvenue', reply_to=first)
+        LiveGift.objects.create(live=live, sender=b, gift='lion')
+        LiveBan.objects.create(live=live, user=b)
 
     def test_every_admin_page_renders(self):
         for model, model_admin in admin.site._registry.items():
-            if model._meta.app_label not in ('accounts', 'chat', 'social'):
+            if model._meta.app_label not in ('accounts', 'chat', 'social', 'live'):
                 continue
             base = f'/admin/{model._meta.app_label}/{model._meta.model_name}/'
             with self.subTest(model=model._meta.label):

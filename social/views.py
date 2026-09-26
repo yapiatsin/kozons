@@ -6,12 +6,20 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from accounts.models import Block, User
+from accounts.push import TTL_SOCIAL, send_to_users
 from accounts.serializers import contact_ids, user_brief
 from chat.realtime import push
 from kozons.api import ApiError, api, as_bool, as_int, body, media_kind, rate_limit
 
 from .models import (CloseFriend, Comment, CommentLike, Follow, Like, Notification, Post, PostMedia,
                      SavedPost, Story, StoryView)
+
+PUSH_VERBS = {
+    'like': 'a aimé votre publication.', 'comment': 'a commenté :', 'reply': 'a répondu à votre commentaire :',
+    'follow': 'a commencé à vous suivre.', 'follow_request': 'souhaite vous suivre.',
+    'follow_accept': "a accepté votre demande d'abonnement.", 'mention': 'vous a mentionné(e) :',
+    'comment_like': 'a aimé votre commentaire :', 'story_like': 'a aimé votre story.',
+}
 
 MENTION_RE = re.compile(r'@([a-zA-Z0-9._]{3,30})')
 PAGE = 12
@@ -54,6 +62,17 @@ def notify(recipient, actor, verb, post=None, comment=None):
         return
     n = Notification.objects.create(recipient=recipient, actor=actor, verb=verb, post=post, comment=comment)
     push([recipient.pk], 'notification', notification_data(n, recipient))
+    text = PUSH_VERBS.get(verb, '')
+    if comment is not None and verb in ('comment', 'reply', 'mention', 'comment_like'):
+        text += ' ' + comment.text[:120]
+    send_to_users([recipient.pk], {
+        'kind': 'social',
+        'title': actor.name,
+        'body': text.strip(),
+        'icon': actor.avatar.url if actor.avatar else None,
+        'url': f'/p/{post.pk}' if post is not None else f'/u/{actor.username}',
+        'tag': f'social-{verb}-{post.pk if post else actor.pk}',
+    }, ttl=TTL_SOCIAL)
 
 
 def notify_mentions(text, actor, post, comment=None):
@@ -219,6 +238,9 @@ def toggle_follow(request, user_id):
     rate_limit(request, 'follow', 200, 3600)
     accepted = not target.is_private
     Follow.objects.create(follower=request.user, following=target, accepted=accepted)
+    if accepted:
+        from live.views import follower_gained
+        follower_gained(target)  # compté dans le résumé d'un live en cours
     notify(target, request.user, 'follow' if accepted else 'follow_request')
     return {'follow_status': 'following' if accepted else 'requested'}
 

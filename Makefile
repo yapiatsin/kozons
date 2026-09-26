@@ -194,6 +194,8 @@ firewall: ## Ouvre dans UFW les ports du serveur TURN (à lancer une fois)
 	ufw allow 3478/udp comment 'kozons-turn'
 	ufw allow 3478/tcp comment 'kozons-turn'
 	ufw allow 49160:49260/udp comment 'kozons-turn relais'
+	ufw allow 8189/udp comment 'kozons-live'
+	ufw allow 8189/tcp comment 'kozons-live'
 	@ufw status | grep kozons
 
 prune: ## Supprime les images Docker inutilisées

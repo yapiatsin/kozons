@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     'accounts',
     'chat',
     'social',
+    'live',
     'kozons',
 ]
 
@@ -37,6 +38,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'accounts.middleware.IdleLogoutMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -150,6 +152,18 @@ DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='Kozons <noreply@local
 # Mot de passe oublié : validité du code, essais autorisés, envoi en tâche de fond.
 PASSWORD_RESET_OTP_MINUTES = config('PASSWORD_RESET_OTP_MINUTES', default=10, cast=int)
 PASSWORD_RESET_MAX_ATTEMPTS = 5
+# Déconnexion automatique après ce délai passé hors de la plateforme.
+IDLE_LOGOUT_MINUTES = config('IDLE_LOGOUT_MINUTES', default=45, cast=int)
+
+# Lives : serveur média MediaMTX (WHIP/WHEP). Vide = mode pair-à-pair (petite audience, développement).
+LIVE_MEDIA_URL = config('LIVE_MEDIA_URL', default='').rstrip('/')
+LIVE_P2P_MAX_VIEWERS = config('LIVE_P2P_MAX_VIEWERS', default=20, cast=int)
+
+# Notifications push (Web Push) : envoyées aux utilisateurs sans application ouverte.
+VAPID_PUBLIC_KEY = config('VAPID_PUBLIC_KEY', default='')
+VAPID_PRIVATE_KEY = config('VAPID_PRIVATE_KEY', default='')
+VAPID_SUBJECT = config('VAPID_SUBJECT', default='mailto:admin@localhost')
+
 # Connexion en deux étapes : code envoyé par e-mail après le mot de passe.
 LOGIN_OTP_MINUTES = config('LOGIN_OTP_MINUTES', default=10, cast=int)
 KOZONS_EMAIL_ASYNC = True

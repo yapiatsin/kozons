@@ -93,7 +93,7 @@ function busy(button, fn) {
 
 // ------------------------------------------------------------------ écrans
 
-export function renderAuth(root, onDone) {
+export function renderAuth(root, onDone, { notice = '' } = {}) {
   const card = h('div.auth-card');
   const tagline = () => h('p.auth-tagline', 'Discutez, appelez, partagez vos moments. Messagerie en temps réel, appels vidéo, stories, publications et reels — au même endroit.');
   const finish = (user, path) => {
@@ -337,5 +337,5 @@ export function renderAuth(root, onDone) {
         h('li', '⭕ Statuts et stories 24 h'),
         h('li', '📸 Publications, reels et découverte'))),
     card));
-  showLogin();
+  showLogin('', notice);
 }

@@ -23,12 +23,12 @@ class KozonsUserAdmin(UserAdmin):
     search_fields = ('username', 'display_name', 'email', 'phone', 'first_name', 'last_name')
     ordering = ('-date_joined',)
     date_hierarchy = 'date_joined'
-    readonly_fields = ('avatar_preview', 'last_seen', 'online_count', 'last_login', 'date_joined')
+    readonly_fields = ('avatar_preview', 'last_seen', 'last_login', 'date_joined')
     fieldsets = (
         (None, {'fields': ('username', 'password')}),
         ('Profil', {'fields': ('display_name', 'email', 'phone', 'avatar', 'avatar_preview', 'about', 'bio', 'website')}),
         ('Confidentialité', {'fields': ('is_private', 'last_seen_visibility', 'avatar_visibility', 'read_receipts')}),
-        ('Présence', {'fields': ('last_seen', 'online_count')}),
+        ('Présence', {'fields': ('last_seen',)}),
         ('Permissions', {'classes': ('collapse',), 'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Dates', {'fields': ('last_login', 'date_joined')}),
     )
@@ -44,9 +44,9 @@ class KozonsUserAdmin(UserAdmin):
     def avatar_preview(self, obj):
         return thumb(obj.avatar.url if obj.avatar else None, 120)
 
-    @admin.display(description='En ligne', boolean=True, ordering='online_count')
+    @admin.display(description='En ligne', boolean=True)
     def is_online(self, obj):
-        return obj.online_count > 0
+        return obj.is_online
 
 
 @admin.register(Block)

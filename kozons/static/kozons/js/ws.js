@@ -1,5 +1,6 @@
 // WebSocket unique avec reconnexion automatique (backoff exponentiel) et heartbeat.
 import { bus } from './store.js';
+import { isActive, onActivityChange } from './activity.js';
 
 let socket = null;
 let attempts = 0;
@@ -18,8 +19,10 @@ export function connect() {
     bus.emit('ws:status', 'online');
     if (reconnected) bus.emit('ws:reconnected');
     while (queue.length) socket.send(queue.shift());
+    // « En ligne » seulement si l'utilisateur est réellement présent sur la plateforme.
+    send('presence', { active: isActive() });
     clearInterval(heartbeat);
-    heartbeat = setInterval(() => send('ping', { t: Date.now() }), 25000);
+    heartbeat = setInterval(() => send('ping', { t: Date.now(), active: isActive() }), 25000);
   };
 
   socket.onmessage = e => {
@@ -31,7 +34,8 @@ export function connect() {
   socket.onclose = e => {
     clearInterval(heartbeat);
     bus.emit('ws:status', 'offline');
-    if (closedByUs || e.code === 4401) return;
+    if (e.code === 4401) { window.dispatchEvent(new Event('kozons:unauthorized')); return; } // session expirée
+    if (closedByUs) return;
     const delay = Math.min(30000, 500 * 2 ** attempts) + Math.random() * 500;
     attempts++;
     setTimeout(connect, delay);
@@ -49,8 +53,11 @@ export function disconnect() {
 export function send(type, data = {}) {
   const payload = JSON.stringify({ type, ...data });
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(payload);
-  else if (type !== 'ping' && type !== 'typing') queue.push(payload);
+  else if (type !== 'ping' && type !== 'typing' && type !== 'presence') queue.push(payload);
 }
+
+// Passage actif <-> absent (onglet masqué, fenêtre en arrière-plan, inactivité) : signalé aussitôt.
+onActivityChange(active => send('presence', { active }));
 
 // Reconnexion immédiate au retour du réseau ou de l'onglet.
 window.addEventListener('online', () => { if (!socket || socket.readyState > 1) { attempts = 0; connect(); } });

@@ -109,6 +109,8 @@ class Message(models.Model):
     story = models.ForeignKey('social.Story', null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     contact_user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     sticker = models.ForeignKey(Sticker, null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
+    # Membres mentionnés (@Nom) dans un message de groupe.
+    mentions = models.ManyToManyField(User, blank=True, related_name='mentioned_in')
     created_at = models.DateTimeField(default=timezone.now)
     edited_at = models.DateTimeField(null=True, blank=True)
     deleted = models.BooleanField(default=False)
