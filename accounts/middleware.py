@@ -27,7 +27,9 @@ class IdleLogoutMiddleware:
                 and not request.path.startswith(EXEMPT_PREFIXES)):
             now = time.time()
             last = request.session.get('kz_last_active')
-            if last is not None and now - last > settings.IDLE_LOGOUT_MINUTES * 60:
+            if request.session.get('kz_remember'):
+                pass  # « Se souvenir de moi » : pas de déconnexion pour inactivité
+            elif last is not None and now - last > settings.IDLE_LOGOUT_MINUTES * 60:
                 logout(request)  # la vue voit un utilisateur anonyme -> 401 / écran de connexion
             elif request.headers.get('X-Kozons-Active') == '1' or last is None:
                 if last is None or now - last >= TOUCH_EVERY:

@@ -20,8 +20,7 @@ from kozons.api import ApiError, api, as_bool, body, media_kind, rate_limit
 
 from .models import Block, OneTimeCode, User
 from .serializers import user_brief, user_private
-from .utils import (send_in_background, send_login_otp_email, send_password_changed_email,
-                    send_password_reset_otp_email)
+from .utils import send_in_background, send_password_changed_email, send_password_reset_otp_email
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,6 @@ USERNAME_RE = re.compile(r'^[a-zA-Z0-9._]{3,30}$')
 RESET_SALT = 'kozons.password-reset'
 RESET_TOKEN_MAX_AGE = 15 * 60
 RESEND_COOLDOWN = timedelta(seconds=60)
-LOGIN_SALT = 'kozons.login-otp'
 
 
 def clean_email(value, exclude_user=None):
@@ -76,7 +74,7 @@ def register(request):
         user.save()
     except IntegrityError:
         raise ApiError("Ce nom d'utilisateur est déjà pris.")
-    login(request, user)
+    open_session(request, user, remember=True)
     return {'user': user_private(user)}
 
 
@@ -91,65 +89,18 @@ def login_view(request):
                         password=data.get('password') or '')
     if user is None:
         raise ApiError('Identifiants incorrects.', 401)
-    if not has_valid_email(user):
-        # Impossible d'envoyer un code : connexion directe (compte créé avant l'e-mail obligatoire).
-        logger.warning("Connexion sans code pour %s : aucune adresse e-mail valide (%r).", user.username, user.email)
-        login(request, user)
-        return {'otp_required': False, 'user': user_private(user)}
-    # Mot de passe correct : on n'ouvre pas encore la session, un code part par e-mail.
-    return _send_login_code(request, user)
+    remember = as_bool(data.get('remember'))
+    open_session(request, user, remember=remember)
+    return {'user': user_private(user), 'remember': remember}
 
 
-def _send_login_code(request, user):
-    code, otp = issue_code(user, OneTimeCode.PURPOSE_LOGIN, settings.LOGIN_OTP_MINUTES)
-    if not send_login_otp_email(user, code, ip=request.META.get('REMOTE_ADDR')):
-        otp.delete()
-        raise ApiError("Le code de connexion n'a pas pu être envoyé. Réessayez dans quelques instants.", 503)
-    return {
-        'otp_required': True,
-        'challenge': signing.dumps({'user': user.pk, 'otp': otp.pk}, salt=LOGIN_SALT),
-        'email_hint': mask_email(user.email),
-        'expires_in_minutes': settings.LOGIN_OTP_MINUTES,
-        'resend_after_seconds': int(RESEND_COOLDOWN.total_seconds()),
-    }
-
-
-def _load_login_challenge(data):
-    try:
-        # Le défi reste valable le temps de saisir / redemander des codes, pas indéfiniment.
-        payload = signing.loads(data.get('challenge') or '', salt=LOGIN_SALT, max_age=30 * 60)
-    except signing.BadSignature:
-        raise ApiError('Votre session de connexion a expiré. Saisissez à nouveau vos identifiants.', 400)
-    user = User.objects.filter(pk=payload.get('user'), is_active=True).first()
-    if user is None:
-        raise ApiError('Votre session de connexion a expiré. Saisissez à nouveau vos identifiants.', 400)
-    return user, payload.get('otp')
-
-
-@api(['POST'], auth=False)
-def login_verify(request):
-    """Étape 2 de la connexion : le code reçu par e-mail ouvre la session."""
-    rate_limit(request, 'login-verify', 20, 900)
-    data = body(request)
-    user, otp_id = _load_login_challenge(data)
-    otp = active_code(user, OneTimeCode.PURPOSE_LOGIN, pk=otp_id)
-    check_code(otp, user, data.get('code'))
-    otp.used_at = timezone.now()
-    otp.save(update_fields=['used_at'])
+def open_session(request, user, remember=False):
+    """Ouvre la session. « Se souvenir de moi » : session longue (SESSION_COOKIE_AGE), conservée à la
+    fermeture du navigateur et sans déconnexion pour inactivité. Sinon : la session se ferme avec le
+    navigateur, ou après IDLE_LOGOUT_MINUTES d'absence."""
     login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-    return {'user': user_private(user)}
-
-
-@api(['POST'], auth=False)
-def login_resend(request):
-    """Renvoie un nouveau code de connexion (1 par minute au plus)."""
-    rate_limit(request, 'login-resend', 5, 900)
-    user, _ = _load_login_challenge(body(request))
-    last = OneTimeCode.objects.filter(user=user, purpose=OneTimeCode.PURPOSE_LOGIN).order_by('-created_at').first()
-    if last and last.created_at > timezone.now() - RESEND_COOLDOWN:
-        wait = int((last.created_at + RESEND_COOLDOWN - timezone.now()).total_seconds()) + 1
-        raise ApiError(f'Patientez {wait} s avant de demander un nouveau code.', 429)
-    return _send_login_code(request, user)
+    request.session['kz_remember'] = bool(remember)
+    request.session.set_expiry(settings.SESSION_COOKIE_AGE if remember else 0)
 
 
 @api(['POST'])
@@ -188,7 +139,7 @@ def me(request):
         elif as_bool(data.get('remove_avatar')):
             user.avatar = None
         user.save()
-    return {'user': user_private(user)}
+    return {'user': user_private(user), 'remember': bool(request.session.get('kz_remember'))}
 
 
 @api(['POST'])
@@ -218,12 +169,6 @@ def has_valid_email(user):
         return True
     except ValidationError:
         return False
-
-
-def mask_email(email):
-    """« devnewtech10.10@gmail.com » -> « de************@gmail.com »."""
-    local, _, domain = email.partition('@')
-    return (local[:2] + '*' * max(1, len(local) - 2)) + '@' + domain
 
 
 def issue_code(user, purpose, minutes):
@@ -337,7 +282,7 @@ def password_reset(request):
         user.set_password(password)  # invalide aussi les sessions ouvertes sur les autres appareils
         user.save(update_fields=['password'])
         OneTimeCode.objects.filter(user=user, purpose=otp.purpose, used_at__isnull=True).update(used_at=timezone.now())
-    login(request, user)
+    open_session(request, user)
     send_in_background(send_password_changed_email, user)
     return {'user': user_private(user)}
 

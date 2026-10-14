@@ -42,7 +42,7 @@ class PasswordRulesTests(TestCase):
         User.objects.create_user('lina', email='lina@example.com', password='Kozons2026')
         r = jpost(Client(), 'auth/login', {'username': 'Lina@Example.com', 'password': 'Kozons2026'})
         self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.json()['otp_required'])
+        self.assertEqual(r.json()['user']['username'], 'lina')
 
 
 @override_settings(MAILERS=LOCMEM, KOZONS_EMAIL_ASYNC=False, DEFAULT_FROM_EMAIL='Kozons <noreply@test>')
@@ -158,79 +158,50 @@ class ForgotPasswordTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
 
 
-@override_settings(MAILERS=LOCMEM, KOZONS_EMAIL_ASYNC=False)
-class LoginOtpTests(TestCase):
+@override_settings(MAILERS=LOCMEM, KOZONS_EMAIL_ASYNC=False, IDLE_LOGOUT_MINUTES=45)
+class LoginTests(TestCase):
+    """Connexion directe par mot de passe (plus de code par e-mail) et « Se souvenir de moi »."""
+
     def setUp(self):
         cache.clear()  # compteurs de limitation de débit
         self.user = User.objects.create_user('alice', email='alice@example.com', password='Kozons2026')
         self.client = Client()
 
-    def start(self, password='Kozons2026'):
-        return jpost(self.client, 'auth/login', {'username': 'alice', 'password': password})
+    def login(self, password='Kozons2026', remember=None):
+        data = {'username': 'alice', 'password': password}
+        if remember is not None:
+            data['remember'] = remember
+        return jpost(self.client, 'auth/login', data)
 
-    def code(self):
-        return re.search(r'([0-9]{6})', mail.outbox[-1].subject).group(1)
-
-    def test_password_then_code_opens_session(self):
-        r = self.start()
+    def test_password_opens_session_without_code(self):
+        r = self.login()
         self.assertEqual(r.status_code, 200, r.content)
-        data = r.json()
-        self.assertTrue(data['otp_required'])
-        self.assertNotIn('user', data)
-        self.assertEqual(data['email_hint'], 'al***@example.com')
-        self.assertIsNone(self.client.get('/api/me').json()['user'])  # pas encore connecté
-        self.assertEqual(mail.outbox[0].to, ['alice@example.com'])
-        self.assertIn('connexion', mail.outbox[0].subject)
-        r = jpost(self.client, 'auth/login/verify', {'challenge': data['challenge'], 'code': self.code()})
-        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()['user']['username'], 'alice')
         self.assertEqual(self.client.get('/api/me').json()['user']['username'], 'alice')
-        # Le code ne sert qu'une fois.
-        r = jpost(Client(), 'auth/login/verify', {'challenge': data['challenge'], 'code': self.code()})
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(len(mail.outbox), 0)                       # aucun e-mail envoyé
+        self.assertFalse(OneTimeCode.objects.exists())
+        self.assertEqual(self.client.post('/api/auth/login/verify').status_code, 404)  # étape supprimée
 
-    def test_wrong_password_sends_nothing(self):
-        self.assertEqual(self.start('Mauvais2026').status_code, 401)
-        self.assertEqual(len(mail.outbox), 0)
-
-    def test_wrong_code_and_attempt_limit(self):
-        challenge = self.start().json()['challenge']
-        good = self.code()
-        wrong = '000000' if good != '000000' else '111111'
-        for _ in range(5):
-            self.assertEqual(jpost(self.client, 'auth/login/verify', {'challenge': challenge, 'code': wrong}).status_code, 400)
-        r = jpost(self.client, 'auth/login/verify', {'challenge': challenge, 'code': good})
-        self.assertEqual(r.status_code, 429)
+    def test_wrong_password(self):
+        self.assertEqual(self.login('Mauvais2026').status_code, 401)
         self.assertIsNone(self.client.get('/api/me').json()['user'])
 
-    def test_tampered_challenge_rejected(self):
-        challenge = self.start().json()['challenge']
-        r = jpost(self.client, 'auth/login/verify', {'challenge': challenge + 'x', 'code': self.code()})
-        self.assertEqual(r.status_code, 400)
-        self.assertIn('session de connexion', r.json()['error'])
+    def test_without_remember_session_ends_with_browser_and_idle(self):
+        self.assertFalse(self.login(remember=False).json()['remember'])
+        self.assertTrue(self.client.session.get_expire_at_browser_close())
+        self.assertFalse(self.client.get('/api/me').json()['remember'])
+        session = self.client.session
+        session['kz_last_active'] = timezone.now().timestamp() - 46 * 60
+        session.save()
+        self.assertEqual(self.client.get('/api/conversations').status_code, 401)  # inactivité : déconnecté
 
-    def test_resend_cooldown_and_new_code(self):
-        challenge = self.start().json()['challenge']
-        first = self.code()
-        self.assertEqual(jpost(self.client, 'auth/login/resend', {'challenge': challenge}).status_code, 429)
-        OneTimeCode.objects.update(created_at=timezone.now() - timedelta(minutes=2))
-        r = jpost(self.client, 'auth/login/resend', {'challenge': challenge})
-        self.assertEqual(r.status_code, 200)
-        new_challenge = r.json()['challenge']
-        second = self.code()
-        if first != second:
-            self.assertEqual(jpost(self.client, 'auth/login/verify', {'challenge': new_challenge, 'code': first}).status_code, 400)
-        self.assertEqual(jpost(self.client, 'auth/login/verify', {'challenge': new_challenge, 'code': second}).status_code, 200)
-
-    def test_account_without_valid_email_logs_in_directly(self):
-        User.objects.create_user('ancien', email='admin', password='Kozons2026')
-        r = jpost(self.client, 'auth/login', {'username': 'ancien', 'password': 'Kozons2026'})
-        self.assertFalse(r.json()['otp_required'])
-        self.assertEqual(self.client.get('/api/me').json()['user']['username'], 'ancien')
-        self.assertEqual(len(mail.outbox), 0)
-
-    def test_smtp_failure_reports_error(self):
-        from unittest import mock
-        with mock.patch('accounts.utils._send_branded_email', side_effect=OSError('SMTP')),                 self.assertLogs('accounts.utils', level='ERROR'):
-            r = self.start()
-        self.assertEqual(r.status_code, 503)
-        self.assertFalse(OneTimeCode.objects.filter(purpose='login').exists())
+    def test_remember_me_keeps_session(self):
+        from django.conf import settings
+        self.assertTrue(self.login(remember=True).json()['remember'])
+        session = self.client.session
+        self.assertFalse(session.get_expire_at_browser_close())
+        self.assertEqual(session.get_expiry_age(), settings.SESSION_COOKIE_AGE)
+        self.assertTrue(self.client.get('/api/me').json()['remember'])
+        session['kz_last_active'] = timezone.now().timestamp() - 10 * 3600
+        session.save()
+        self.assertEqual(self.client.get('/api/conversations').status_code, 200)  # toujours connecté

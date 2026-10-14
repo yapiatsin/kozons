@@ -21,9 +21,17 @@ async function iceServers() {
   try { return (await api.get('calls/ice')).ice_servers; } catch (e) { return [{ urls: 'stun:stun.l.google.com:19302' }]; }
 }
 
+// Résolution standard de la caméra (16:9, sans forcer le portrait) : forcer 720×1280 sur une webcam
+// paysage oblige le navigateur à recadrer l'image, ce qui produit un effet de zoom sur le visage.
+// Les téléphones en portrait renvoient d'eux-mêmes un flux vertical.
+function videoConstraints() {
+  // resizeMode 'none' : le navigateur ne recadre jamais l'image du capteur pour atteindre la taille demandée
+  return { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, resizeMode: 'none' };
+}
+
 function getCamera() {
   return navigator.mediaDevices.getUserMedia({
-    video: { facingMode: facing, width: { ideal: 720 }, height: { ideal: 1280 }, frameRate: { ideal: 30 } },
+    video: videoConstraints(),
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
 }
@@ -488,7 +496,7 @@ async function startHostMedia(ctx, video, setStatus) {
 async function flipCamera(ctx, video) {
   facing = facing === 'user' ? 'environment' : 'user';
   try {
-    const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 720 }, height: { ideal: 1280 } } });
+    const s = await navigator.mediaDevices.getUserMedia({ video: videoConstraints() });
     const track = s.getVideoTracks()[0];
     const old = ctx.stream.getVideoTracks()[0];
     const pcs = [ctx.pc, ...ctx.pcs.values()].filter(Boolean);

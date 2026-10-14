@@ -96,15 +96,19 @@ function busy(button, fn) {
 export function renderAuth(root, onDone, { notice = '' } = {}) {
   const card = h('div.auth-card');
   const tagline = () => h('p.auth-tagline', 'Discutez, appelez, partagez vos moments. Messagerie en temps réel, appels vidéo, stories, publications et reels — au même endroit.');
-  const finish = (user, path) => {
+  const finish = (user, path, remember = false) => {
     history.replaceState({}, '', path || location.pathname);
-    onDone(user);
+    onDone(user, remember);
   };
 
   function showLogin(prefill = '', notice = '') {
     const error = h('div.auth-error');
     const username = h('input.input', { name: 'username', placeholder: "Nom d'utilisateur ou e-mail", autocomplete: 'username', required: true, autocapitalize: 'none', value: prefill });
     const pw = passwordInput();
+    // « Se souvenir de moi » : le dernier choix est repris sur cet appareil.
+    let rememberDefault = false;
+    try { rememberDefault = localStorage.getItem('kozons.remember') === '1'; } catch (e) { /* ignoré */ }
+    const remember = h('input', { type: 'checkbox', name: 'remember', checked: rememberDefault });
     const submit = h('button.btn.primary.block', { type: 'submit' }, 'Se connecter');
     const form = h('form.auth-form', {
       onsubmit: e => {
@@ -112,14 +116,16 @@ export function renderAuth(root, onDone, { notice = '' } = {}) {
         busy(submit, async () => {
           error.textContent = '';
           try {
-            const res = await api.post('auth/login', { username: username.value.trim(), password: pw.input.value });
-            if (res.otp_required) showLoginCode(res, username.value.trim());
-            else finish(res.user);
+            const res = await api.post('auth/login', { username: username.value.trim(), password: pw.input.value, remember: remember.checked });
+            try { localStorage.setItem('kozons.remember', remember.checked ? '1' : '0'); } catch (e) { /* ignoré */ }
+            finish(res.user, null, res.remember);
           } catch (err) { error.textContent = err.message; }
         })();
       },
     }, username, pw.el,
-    h('div.auth-forgot', link('Mot de passe oublié ?', () => showForgot(username.value.trim()))),
+    h('div.auth-options',
+      h('label.auth-remember', { title: 'Rester connecté sur cet appareil, même après fermeture du navigateur' }, remember, h('span', 'Se souvenir de moi')),
+      link('Mot de passe oublié ?', () => showForgot(username.value.trim()))),
     error, submit);
     clear(card,
       h('h2', 'Bienvenue'),
@@ -128,66 +134,6 @@ export function renderAuth(root, onDone, { notice = '' } = {}) {
       form,
       h('p.auth-switch', "Vous n'avez pas de compte ? ", link('Inscrivez-vous', showRegister)));
     (prefill ? pw.input : username).focus();
-  }
-
-  // Étape 2 de la connexion : code à 6 chiffres reçu par e-mail.
-  function showLoginCode(res, identifier) {
-    let challenge = res.challenge;
-    let cooldownTimer = null;
-    const stop = () => clearInterval(cooldownTimer);
-    const error = h('div.auth-error');
-    const notice = h('div.auth-notice', icon('lock', 16), ` Code envoyé à ${res.email_hint}`);
-    const submit = h('button.btn.primary.block', { type: 'submit' }, 'Valider et se connecter');
-    const verify = busy(submit, async () => {
-      const code = otp.value();
-      if (code.length !== 6) { error.textContent = 'Saisissez les 6 chiffres du code.'; return; }
-      error.textContent = '';
-      try {
-        const { user } = await api.post('auth/login/verify', { challenge, code });
-        stop();
-        finish(user, '/');
-      } catch (err) {
-        error.textContent = err.message;
-        otp.clear();
-        if (/session de connexion/.test(err.message)) { // défi expiré : retour au formulaire
-          stop();
-          showLogin(identifier, err.message);
-        }
-      }
-    });
-    const otp = otpInput(() => verify());
-    const resend = h('button.link.resend', { type: 'button' });
-    const startCooldown = seconds => {
-      stop();
-      let left = seconds;
-      const tick = () => {
-        resend.disabled = left > 0;
-        resend.textContent = left > 0 ? `Renvoyer le code (${left} s)` : 'Renvoyer le code';
-        if (left-- <= 0) stop();
-      };
-      tick();
-      cooldownTimer = setInterval(tick, 1000);
-    };
-    resend.onclick = async () => {
-      resend.disabled = true;
-      try {
-        const r = await api.post('auth/login/resend', { challenge });
-        challenge = r.challenge;
-        error.textContent = '';
-        notice.lastChild.textContent = ` Nouveau code envoyé à ${r.email_hint}`;
-        otp.clear();
-        startCooldown(r.resend_after_seconds);
-      } catch (err) { error.textContent = err.message; resend.disabled = false; }
-    };
-    clear(card,
-      h('h2', 'Vérification'),
-      notice,
-      h('p.auth-lead', `Saisissez le code à 6 chiffres reçu par e-mail. Il expire dans ${res.expires_in_minutes} minutes. Pensez à vérifier vos courriers indésirables.`),
-      h('form.auth-form', { onsubmit: e => { e.preventDefault(); verify(); } },
-        otp.el, error, submit,
-        h('div.auth-row', resend, link('Changer de compte', () => { stop(); showLogin(identifier); }))));
-    startCooldown(res.resend_after_seconds);
-    otp.focus();
   }
 
   function showRegister() {
@@ -208,7 +154,7 @@ export function renderAuth(root, onDone, { notice = '' } = {}) {
               username: username.value.trim(), email: email.value.trim(),
               display_name: displayName.value.trim(), password: pw.input.value,
             });
-            finish(user, '/settings');
+            finish(user, '/settings', true);  // inscription : appareil mémorisé
           } catch (err) { error.textContent = err.message; }
         })();
       },

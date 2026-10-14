@@ -235,3 +235,82 @@ class ConsumerTests(TransactionTestCase):
 
         await wa.disconnect()
         await wb.disconnect()
+
+
+class CallResilienceTests(TransactionTestCase):
+    """Un appel ne doit pas se couper à la moindre coupure de la connexion temps réel."""
+
+    async def connect(self, user):
+        from chat.consumers import KozonsConsumer
+        comm = WebsocketCommunicator(KozonsConsumer.as_asgi(), '/ws/')
+        comm.scope['user'] = user
+        ok, _ = await comm.connect()
+        self.assertTrue(ok)
+        return comm
+
+    async def recv(self, comm, kind, tries=15):
+        for _ in range(tries):
+            evt = await comm.receive_json_from(timeout=2)
+            if evt['type'] == kind:
+                return evt['data']
+        raise AssertionError(f'{kind} non reçu')
+
+    async def ongoing_call(self):
+        from accounts import presence
+        presence.reset()
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x')
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x')
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
+        call_id = (await self.recv(wb, 'call.incoming'))['call']['id']
+        await wb.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        await self.recv(wa, 'call.accepted')
+        return alice, bob, wa, wb, call_id
+
+    async def status(self, call_id):
+        from chat.models import Call
+        return await sync_to_async(lambda: Call.objects.get(pk=call_id).status)()
+
+    @override_settings(CALL_RECONNECT_GRACE=0.5)
+    async def test_short_drop_keeps_call_and_resyncs(self):
+        import asyncio
+        alice, bob, wa, wb, call_id = await self.ongoing_call()
+        await wa.disconnect()                      # réseau de l'appelante coupé…
+        wa = await self.connect(alice)             # … puis rétabli avant la fin du délai de grâce
+        resync = await self.recv(wa, 'call.accepted')
+        self.assertTrue(resync['resync'])
+        await asyncio.sleep(0.8)
+        self.assertEqual(await self.status(call_id), 'ongoing')
+        # La signalisation passe toujours par la nouvelle connexion.
+        await wb.send_json_to({'type': 'call.signal', 'call_id': call_id, 'data': {'restart': True}})
+        self.assertEqual((await self.recv(wa, 'call.signal'))['data'], {'restart': True})
+        await wa.disconnect()
+        await wb.disconnect()
+
+    @override_settings(CALL_RECONNECT_GRACE=0.3)
+    async def test_lasting_drop_ends_call(self):
+        import asyncio
+        alice, bob, wa, wb, call_id = await self.ongoing_call()
+        await wa.disconnect()
+        self.assertEqual(await self.status(call_id), 'ongoing')   # pas raccroché tout de suite
+        await asyncio.sleep(0.7)
+        self.assertEqual(await self.status(call_id), 'ended')
+        self.assertEqual((await self.recv(wb, 'call.ended'))['reason'], 'ended')
+        await wb.disconnect()
+
+    async def test_ghost_call_does_not_make_callee_busy(self):
+        from chat.models import Call
+        from django.utils import timezone
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x')
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x')
+        carol = await sync_to_async(User.objects.create_user)('carol', password='x')
+        # Ancien appel resté « en cours » (serveur redémarré pendant l'appel, par exemple).
+        ghost = await sync_to_async(Call.objects.create)(caller=carol, callee=bob, status='ongoing', answered_at=timezone.now())
+        from accounts import presence
+        presence.reset()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
+        self.assertIn('call', await self.recv(wb, 'call.incoming'))
+        self.assertEqual(await self.status(ghost.pk), 'ended')
+        await wa.disconnect()
+        await wb.disconnect()

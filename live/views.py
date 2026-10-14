@@ -109,7 +109,12 @@ def media_auth(request):
     action, path = data.get('action'), (data.get('path') or '').strip('/')
     query = data.get('query') or ''
     token = next((part[6:] for part in query.split('&') if part.startswith('token=')), '') or data.get('token') or ''
-    if action in ('publish', 'read') and svc.check_media_token(unquote(token), path, action):
+    if action not in ('publish', 'read'):
+        return HttpResponse(status=401)
+    # Même serveur média pour les lives et les réunions Kozons Meet (chemins « mt_… »).
+    from meet import services as meet_svc
+    check = meet_svc.check_media_token if path.startswith(meet_svc.MEDIA_PREFIX) else svc.check_media_token
+    if check(unquote(token), path, action):
         return HttpResponse(status=200)
     return HttpResponse(status=401)
 

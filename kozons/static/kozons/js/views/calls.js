@@ -50,7 +50,8 @@ export function installCalls() {
     current.call = call;
     setStatus(callee_online ? 'Sonnerie…' : 'Appel en cours…');
     current.stopRing = ringback();
-    current.timeout = setTimeout(() => { if (current && current.call && !current.connectedAt) { send('call.end', { call_id: current.call.id }); } }, 45000);
+    // Sans réponse au bout de 50 s : appel manqué. (Annulé dès que l'appel est décroché.)
+    current.timeout = setTimeout(() => { if (current && current.call && !current.answered) send('call.end', { call_id: current.call.id }); }, 50000);
   });
 
   bus.on('call.incoming', async ({ call }) => {
@@ -73,6 +74,11 @@ export function installCalls() {
 
   bus.on('call.accepted', async ({ call }) => {
     if (!current || !current.call || current.call.id !== call.id || current.role !== 'caller') return;
+    // Renvoyé par le serveur après une reconnexion : si la connexion existe déjà, on la relance.
+    if (current.pc) { restartIce(); return; }
+    current.answered = true;
+    clearTimeout(current.timeout);
+    watchConnection();
     stopRinging();
     setStatus('Connexion…');
     await createPeer();
@@ -85,6 +91,7 @@ export function installCalls() {
     if (!current || !current.call || current.call.id !== call_id || !current.accepted || !current.pc) return;
     const pc = current.pc;
     try {
+      if (data.restart) { restartIce(); return; }  // demande de l'appelé : renégociation par l'appelant
       if (data.sdp) {
         await pc.setRemoteDescription(data.sdp);
         for (const c of current.candidates.splice(0)) await pc.addIceCandidate(c).catch(() => {});
@@ -110,6 +117,11 @@ export function installCalls() {
     bus.emit('calls:changed');
   });
 
+  // Connexion temps réel rétablie pendant un appel : des messages de connexion ont pu se perdre.
+  bus.on('ws:reconnected', () => {
+    if (current && current.accepted && current.pc && current.pc.connectionState !== 'connected') restartIce();
+  });
+
   bus.on('error', ({ message, for: forType }) => {
     if (forType && forType.startsWith('call.')) { toast(message, { type: 'error' }); if (current && !current.call) cleanup(); }
   });
@@ -129,27 +141,57 @@ async function createPeer() {
     attachStreams();
   };
   pc.onicecandidate = e => { if (e.candidate && current && current.call) send('call.signal', { call_id: current.call.id, data: { candidate: e.candidate } }); };
-  pc.onconnectionstatechange = async () => {
-    if (!current) return;
+  pc.onconnectionstatechange = () => {
+    if (!current || current.pc !== pc) return;
     const s = pc.connectionState;
+    clearTimeout(current.dropTimer);
     if (s === 'connected') {
       if (!current.connectedAt) { current.connectedAt = Date.now(); startTimer(); }
+      current.restarts = 0;
       setStatus(null);
     } else if (s === 'disconnected') {
+      // Coupure passagère (changement de réseau…) : on relance si elle dure plus de 3 s,
+      // sans attendre les ~30 s au bout desquelles le navigateur déclare la connexion perdue.
       setStatus('Reconnexion…');
+      current.dropTimer = setTimeout(() => { if (current && current.pc === pc && pc.connectionState !== 'connected') restartIce(); }, 3000);
     } else if (s === 'failed') {
-      setStatus('Connexion instable…');
-      // Redémarrage ICE : c'est l'appelant qui renégocie.
-      if (current.role === 'caller') {
-        try {
-          const offer = await pc.createOffer({ iceRestart: true });
-          await pc.setLocalDescription(offer);
-          send('call.signal', { call_id: current.call.id, data: { sdp: pc.localDescription } });
-        } catch (e) { /* ignoré */ }
-      }
+      setStatus('Reconnexion…');
+      restartIce();
     }
   };
   return pc;
+}
+
+/** Relance la négociation réseau (ICE restart). L'appelant fait l'offre ; l'appelé la lui demande. */
+async function restartIce() {
+  if (!current || !current.pc || !current.call) return;
+  const now = Date.now();
+  if (now - (current.lastRestart || 0) < 2500) return;  // une relance à la fois
+  current.lastRestart = now;
+  current.restarts = (current.restarts || 0) + 1;
+  if (current.role !== 'caller') {
+    send('call.signal', { call_id: current.call.id, data: { restart: true } });
+    return;
+  }
+  const pc = current.pc;
+  try {
+    pc.restartIce();
+    const offer = await pc.createOffer({ iceRestart: true });
+    await pc.setLocalDescription(offer);
+    send('call.signal', { call_id: current.call.id, data: { sdp: pc.localDescription } });
+  } catch (e) { console.warn('[call] relance', e); }
+}
+
+/** Après le décroché : relances si la connexion tarde, puis abandon propre au bout de 45 s. */
+function watchConnection() {
+  const call = current;
+  const check = (delay, last) => setTimeout(() => {
+    if (current !== call || current.connectedAt) return;
+    if (!last) { restartIce(); return; }
+    toast('Connexion impossible avec votre correspondant. Vérifiez votre réseau et réessayez.', { type: 'error', timeout: 6000 });
+    hangup();
+  }, delay);
+  call.watch = [check(12000), check(25000), check(45000, true)];
 }
 
 async function accept() {
@@ -164,9 +206,11 @@ async function accept() {
   }
   current.localStream = stream;
   current.accepted = true;
+  current.answered = true;
   showCallUI('Connexion…');
   await createPeer();
   send('call.accept', { call_id: current.call.id });
+  watchConnection();
 }
 
 function decline() {
@@ -189,6 +233,8 @@ function cleanup() {
   if (!current) return;
   stopRinging();
   clearTimeout(current.timeout);
+  clearTimeout(current.dropTimer);
+  (current.watch || []).forEach(clearTimeout);
   clearInterval(current.timer);
   if (current.pc) try { current.pc.close(); } catch (e) { /* ignoré */ }
   for (const s of [current.localStream, current.screenStream]) if (s) s.getTracks().forEach(t => t.stop());
@@ -500,7 +546,8 @@ export function render(stage) {
   const search = h('input.search-input', { type: 'search', placeholder: 'Rechercher un contact à appeler' });
   const results = h('div');
   const page = h('div.page.narrow',
-    h('header.page-head', h('h2', 'Appels')),
+    h('header.page-head', h('h2', 'Appels'),
+      h('button.btn.primary.small', { onclick: () => window.kozons.go('/meet') }, icon('video', 16), ' Réunions Meet')),
     h('div.search-box', icon('search', 18), search),
     results,
     h('div.list-title', 'Récents'),

@@ -20,6 +20,10 @@ const ROUTES = [
   [/^\/live$/, () => import('./views/live.js'), () => ({})],
   [/^\/live\/new$/, () => import('./views/live.js'), () => ({ new: true })],
   [/^\/live\/(\d+)$/, () => import('./views/live.js'), m => ({ id: +m[1] })],
+  [/^\/meet$/, () => import('./views/meet.js'), () => ({})],
+  [/^\/meet\/notes$/, () => import('./views/meet.js'), () => ({ notes: true })],
+  [/^\/meet\/notes\/(\d+)$/, () => import('./views/meet.js'), m => ({ notes: true, id: +m[1] })],
+  [/^\/meet\/([a-z0-9-]+)$/i, () => import('./views/meet.js'), m => ({ code: m[1].toLowerCase() })],
   [/^\/notifications$/, () => import('./views/notifications.js'), () => ({})],
   [/^\/u\/([^/]+)$/, () => import('./views/profile.js'), m => ({ username: decodeURIComponent(m[1]) })],
   [/^\/p\/(\d+)$/, () => import('./views/post.js'), m => ({ id: +m[1] })],
@@ -35,6 +39,7 @@ const NAV = [
   ['/explore', 'explore', 'Explorer', 'explore'],
   ['/reels', 'reels', 'Reels', 'reels'],
   ['/live', 'live', 'LIVE', 'live'],
+  ['/meet', 'video', 'Meet', 'meet'],
   ['/notifications', 'heart', 'Notifications', 'notifications'],
 ];
 
@@ -55,7 +60,7 @@ async function boot() {
   // Session fermée par le serveur (ex. inactivité) : retour à l'écran de connexion.
   window.addEventListener('kozons:unauthorized', () => {
     if (!state.me) return;
-    if (Date.now() - lastActiveAt() > IDLE_MS) try { sessionStorage.setItem('kozons.idleLogout', '1'); } catch (e) { /* ignoré */ }
+    if (!state.remember && Date.now() - lastActiveAt() > IDLE_MS) try { sessionStorage.setItem('kozons.idleLogout', '1'); } catch (e) { /* ignoré */ }
     logoutLocal();
   });
   if ('serviceWorker' in navigator) {
@@ -63,7 +68,7 @@ async function boot() {
     navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.type === 'open' && e.data.url) go(e.data.url); });
   }
   let me = null;
-  try { ({ user: me } = await api.get('me')); } catch (e) { /* hors ligne */ }
+  try { ({ user: me, remember: state.remember } = await api.get('me')); } catch (e) { /* hors ligne */ }
   if (me) start(me); else showAuth();
 }
 
@@ -76,7 +81,7 @@ function showAuth() {
       sessionStorage.removeItem('kozons.idleLogout');
     }
   } catch (e) { /* ignoré */ }
-  renderAuth(root, user => start(user), { notice });
+  renderAuth(root, (user, remember) => { state.remember = !!remember; start(user); }, { notice });
 }
 
 async function start(me) {
@@ -98,6 +103,15 @@ async function start(me) {
     toast(`🔴 ${live.host.name} est en LIVE${live.title ? ' : ' + live.title : ''}`, {
       timeout: 8000, action: { label: 'Regarder', run: () => go('/live/' + live.id) },
     });
+  });
+  // Kozons Meet : invitation à une réunion, notes IA prêtes.
+  bus.on('meet.invited', ({ meeting, by }) => {
+    const when = meeting.scheduled_at ? new Date(meeting.scheduled_at).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' }) : 'maintenant';
+    toast(`📅 ${by.name} vous invite : ${meeting.label} (${when})`, { timeout: 10000, action: { label: 'Voir', run: () => go('/meet/' + meeting.code) } });
+  });
+  bus.on('meet.notes_ready', ({ notes }) => {
+    if (!notes || !['ready', 'no_ai', 'failed'].includes(notes.status) || location.pathname === '/meet/notes/' + notes.id) return;
+    toast(`📝 Notes de réunion prêtes : ${notes.title}`, { timeout: 10000, action: { label: 'Ouvrir', run: () => go('/meet/notes/' + notes.id) } });
   });
   bus.on('notification', n => {
     state.notifications.unread++;
@@ -135,6 +149,7 @@ function shell() {
         { label: 'Reel', icon: 'reels', action: () => import('./views/feed.js').then(m => m.createPostDialog({ reel: true })) },
         { label: 'Story', icon: 'status', action: () => import('./views/stories.js').then(m => m.createStoryDialog()) },
         { label: 'LIVE', icon: 'live', action: () => go('/live/new') },
+        { label: 'Réunion Meet', icon: 'video', action: () => go('/meet') },
       ]),
     }, icon('plusSquare', 24), h('span.rail-label', 'Créer'))),
     (navEls.settings = h('a.rail-item', { href: '/settings', title: 'Paramètres', onclick: e => { e.preventDefault(); go('/settings'); } }, icon('settings', 24), h('span.rail-label', 'Paramètres'))),
@@ -142,7 +157,8 @@ function shell() {
       avatar(state.me.avatar, state.me.name, 28), h('span.rail-label', 'Profil'))),
   );
   stage = h('main.stage');
-  return h('div.shell', rail, stage, h('div.offline-bar', 'Connexion perdue — reconnexion en cours…'));
+  // Pas de bandeau « Connexion perdue » : la reconnexion se fait en arrière-plan, sans rien afficher.
+  return h('div.shell', rail, stage);
 }
 
 export function refreshMe(user) {
@@ -188,7 +204,7 @@ async function route() {
   if (!found) return go('/', { replace: true });
   const [loader, params] = found;
   const module = await loader();
-  const key = Object.entries({ '/': 'chats', '/chats': 'chats', '/status': 'status', '/calls': 'calls', '/feed': 'feed', '/explore': 'explore', '/reels': 'reels', '/live': 'live', '/notifications': 'notifications', '/settings': 'settings', '/u/': 'profile' })
+  const key = Object.entries({ '/': 'chats', '/chats': 'chats', '/status': 'status', '/calls': 'calls', '/feed': 'feed', '/explore': 'explore', '/reels': 'reels', '/live': 'live', '/meet': 'meet', '/notifications': 'notifications', '/settings': 'settings', '/u/': 'profile' })
     .find(([p]) => p === '/' ? path === '/' : path.startsWith(p));
   Object.entries(navEls).forEach(([k, el]) => el.classList.toggle('active', key && key[1] === k && (k !== 'profile' || path === '/u/' + state.me.username)));
   document.body.dataset.view = key ? key[1] : '';
@@ -219,7 +235,8 @@ function watchIdle() {
   };
   const check = () => {
     if (!state.me) return;
-    if (!isActive() && Date.now() - lastActiveAt() > IDLE_MS) return logout({ idle: true });
+    // « Se souvenir de moi » : pas de déconnexion pour inactivité sur cet appareil.
+    if (!state.remember && !isActive() && Date.now() - lastActiveAt() > IDLE_MS) return logout({ idle: true });
     beat();
   };
   onActivityChange(check);

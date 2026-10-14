@@ -120,26 +120,6 @@ def send_password_reset_otp_email(user, otp):
         return False
 
 
-def send_login_otp_email(user, otp, ip=None):
-    try:
-        _send_branded_email(
-            subject=f'{otp} est votre code de connexion Kozons',
-            recipient=user.email,
-            template_name='email/login_otp.html',
-            context={
-                'user': user,
-                'otp': otp,
-                'ip': ip,
-                'expires_in': f'{settings.LOGIN_OTP_MINUTES} minutes',
-            },
-        )
-        logger.info("Code de connexion envoyé à l'utilisateur %s", user.pk)
-        return True
-    except Exception as e:
-        logger.error("Erreur envoi email OTP connexion: %s", e, exc_info=True)
-        return False
-
-
 def send_password_changed_email(user):
     try:
         _send_branded_email(

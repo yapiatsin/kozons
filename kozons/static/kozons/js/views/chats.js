@@ -24,6 +24,22 @@ let showArchived = false;
 let pane = null; // état de la conversation ouverte
 let offs = [];
 
+// Hauteur du clavier virtuel, mémorisée dans --kb-h : le panneau emoji prend exactement sa place.
+(function trackKeyboardHeight() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  try { const saved = localStorage.getItem('kozons.kbh'); if (saved) document.documentElement.style.setProperty('--kb-h', saved + 'px'); } catch (e) { /* stockage indisponible */ }
+  let full = vv.height, width = vv.width;
+  vv.addEventListener('resize', () => {
+    if (vv.width !== width) { width = vv.width; full = vv.height; return; } // rotation
+    if (vv.height > full) full = vv.height;
+    const kb = Math.round(full - vv.height);
+    if (kb < 150 || kb > full * 0.7) return; // pas un clavier (barre d'adresse, zoom…)
+    document.documentElement.style.setProperty('--kb-h', kb + 'px');
+    try { localStorage.setItem('kozons.kbh', kb); } catch (e) { /* stockage indisponible */ }
+  });
+})();
+
 export function render(stage, params) {
   root = h('div.chats' + (params.id ? '.has-active' : ''));
   searchInput = h('input.search-input', { type: 'search', placeholder: 'Rechercher ou démarrer une discussion' });
@@ -630,11 +646,15 @@ function buildComposer() {
     enabled: () => !!pane && pane.conv.kind === 'group',
   });
   const resize = () => { baseResize(); mention.refresh(); };
+  // Téléphone : le panneau emoji prend la place du clavier (comme WhatsApp), on ne redonne donc
+  // pas le focus au champ après un emoji, sinon le clavier réapparaîtrait.
+  const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
   const emojiTab = emojiPicker(e => {
     const s = input.selectionStart ?? input.value.length;
     input.value = input.value.slice(0, s) + e + input.value.slice(input.selectionEnd ?? s);
     input.selectionStart = input.selectionEnd = s + e.length;
-    input.focus(); resize(); toggleSend();
+    if (!isPhone()) input.focus();
+    resize(); toggleSend();
   });
   // Panneau emoji / stickers (barre d'onglets en bas, comme WhatsApp). Stickers chargés à la demande.
   let stickersTab = null;
@@ -642,7 +662,7 @@ function buildComposer() {
   const pickerTabs = h('div.picker-switch');
   const showPicker = which => {
     if (which === 'stickers' && !stickersTab) {
-      stickersTab = stickerPanel({ onSend: sticker => { sendSticker(sticker); emojiPanel.classList.add('hidden'); } });
+      stickersTab = stickerPanel({ onSend: sticker => { sendSticker(sticker); closePicker(); } });
       pane.cleanup.push(() => stickersTab.cleanup());
     }
     pickerBody.replaceChildren(which === 'stickers' ? stickersTab : emojiTab);
@@ -696,7 +716,7 @@ function buildComposer() {
     input.value = ''; mention.clear(); resize(); toggleSend();
     setReply(null);
     sendTyping('stop');
-    emojiPanel.classList.add('hidden');
+    if (!isPhone()) closePicker();
     // Messages très longs : découpés comme WhatsApp (65 536 caractères max).
     sendMessage(pane.convId, {
       kind: 'text', text, reply_to: reply && reply.id, reply_preview: reply && quotePreview(reply),
@@ -715,11 +735,30 @@ function buildComposer() {
     { label: 'Contact', icon: 'contact', action: () => contactDialog(u => sendMessage(pane.convId, { kind: 'contact', contact_id: u.id }).catch(errorToast)) },
     { label: 'Sondage', icon: 'poll', action: () => pollDialog(({ question, options, multiple }) => sendMessage(pane.convId, { kind: 'poll', text: question, options, multiple }).catch(errorToast)) },
   ]));
-  const emojiBtn = btn('smile', 'Emoji et stickers', () => emojiPanel.classList.toggle('hidden'));
+  // Ouvrir le panneau : sur téléphone, on ferme le clavier et le panneau prend sa place,
+  // le bouton devient « clavier ». Le refermer depuis ce bouton rouvre le clavier.
+  const setPicker = open => {
+    emojiPanel.classList.toggle('hidden', !open);
+    composer.classList.toggle('picker-open', open);
+    const kb = open && isPhone();
+    emojiBtn.replaceChildren(icon(kb ? 'keyboard' : 'smile'));
+    emojiBtn.title = kb ? 'Clavier' : 'Emoji et stickers';
+    emojiBtn.setAttribute('aria-label', emojiBtn.title);
+  };
+  const closePicker = () => setPicker(false);
+  const emojiBtn = btn('smile', 'Emoji et stickers', () => {
+    const open = emojiPanel.classList.contains('hidden');
+    if (isPhone()) {
+      if (open) input.blur();
+      else input.focus();
+    }
+    setPicker(open);
+  });
+  // Toucher le champ pendant que le panneau est ouvert : le clavier revient à sa place.
+  input.addEventListener('focus', () => { if (isPhone() && !emojiPanel.classList.contains('hidden')) closePicker(); });
 
   // Fermeture automatique : clic / toucher en dehors du panneau, ou touche Échap.
   // Les menus et fenêtres ouverts depuis le panneau (#overlay-root) ne le ferment pas.
-  const closePicker = () => emojiPanel.classList.add('hidden');
   const onOutside = e => {
     if (emojiPanel.classList.contains('hidden')) return;
     if (emojiPanel.contains(e.target) || emojiBtn.contains(e.target)) return;
@@ -742,7 +781,8 @@ function buildComposer() {
     pane.cleanup.push(() => pane.removePickerListeners && pane.removePickerListeners());
   }
 
-  clear(composer, emojiPanel, mention.picker, topBar, h('div.composer-row', emojiBtn, attach, h('div.composer-field', mention.field), sendBtn));
+  // Le panneau est placé après la barre de saisie : sur téléphone il occupe la place du clavier.
+  clear(composer, mention.picker, topBar, h('div.composer-row', emojiBtn, attach, h('div.composer-field', mention.field), sendBtn), emojiPanel);
   updateComposerState();
 }
 

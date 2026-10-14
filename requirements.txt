@@ -9,3 +9,5 @@ pywebpush>=2.0
 channels-redis>=4.2
 # PostgreSQL (production, conteneur kozons-db) :
 psycopg[binary]>=3.2
+# Kozons Meet : notes et résumés de réunion par IA (Claude) :
+anthropic>=1.13,<2

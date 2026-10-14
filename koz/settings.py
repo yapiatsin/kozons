@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     'chat',
     'social',
     'live',
+    'meet',
     'kozons',
 ]
 
@@ -159,13 +160,16 @@ IDLE_LOGOUT_MINUTES = config('IDLE_LOGOUT_MINUTES', default=45, cast=int)
 LIVE_MEDIA_URL = config('LIVE_MEDIA_URL', default='').rstrip('/')
 LIVE_P2P_MAX_VIEWERS = config('LIVE_P2P_MAX_VIEWERS', default=20, cast=int)
 
+# Kozons Meet : notes et résumés de réunion rédigés par Claude (API Anthropic).
+# Sans clé, la prise de notes fournit la transcription seule.
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+MEET_AI_MODEL = config('MEET_AI_MODEL', default='claude-opus-5-5')
+
 # Notifications push (Web Push) : envoyées aux utilisateurs sans application ouverte.
 VAPID_PUBLIC_KEY = config('VAPID_PUBLIC_KEY', default='')
 VAPID_PRIVATE_KEY = config('VAPID_PRIVATE_KEY', default='')
 VAPID_SUBJECT = config('VAPID_SUBJECT', default='mailto:admin@localhost')
 
-# Connexion en deux étapes : code envoyé par e-mail après le mot de passe.
-LOGIN_OTP_MINUTES = config('LOGIN_OTP_MINUTES', default=10, cast=int)
 KOZONS_EMAIL_ASYNC = True
 
 # Journalisation : tout sur la console (erreurs d'envoi d'e-mail, diagnostics).

@@ -4,14 +4,13 @@ from accounts import views as accounts
 from chat import stickers
 from chat import views as chat
 from live import views as live
+from meet import views as meet
 from social import views as social
 
 urlpatterns = [
     # Comptes
     path('auth/register', accounts.register),
     path('auth/login', accounts.login_view),
-    path('auth/login/verify', accounts.login_verify),
-    path('auth/login/resend', accounts.login_resend),
     path('auth/logout', accounts.logout_view),
     path('auth/password', accounts.change_password),
     path('auth/password/forgot', accounts.password_forgot),
@@ -69,6 +68,17 @@ urlpatterns = [
     path('live/<int:pk>', live.live_detail),
     path('live/<int:pk>/end', live.live_end),
     path('live/<int:pk>/viewers', live.live_viewers),
+
+    # Kozons Meet
+    path('meet', meet.meetings),
+    path('meet/notes', meet.notes_list),
+    path('meet/notes/<int:pk>', meet.notes_detail),
+    path('meet/notes/<int:pk>/retry', meet.notes_retry),
+    path('meet/notes/<int:pk>/delete', meet.notes_delete),
+    path('meet/<str:code>', meet.meeting_detail),
+    path('meet/<str:code>/update', meet.meeting_update),
+    path('meet/<str:code>/cancel', meet.meeting_cancel),
+    path('meet/<str:code>/messages', meet.meeting_messages),
 
     # Social
     path('feed', social.feed),
