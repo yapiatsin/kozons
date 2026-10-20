@@ -43,7 +43,22 @@ def app(request):
         'css_url': assets.get('css/app.css', static('kozons/css/app.css')),
         'app_js_url': assets.get('js/app.js', static('kozons/js/app.js')),
         'idle_logout_minutes': settings.IDLE_LOGOUT_MINUTES,
+        'og': open_graph(request),
     })
+
+
+def open_graph(request):
+    """Aperçu du lien partagé (WhatsApp, Facebook, SMS…) : invitation personnalisée ou présentation de Kozons."""
+    og = {'title': 'Kozons', 'description': 'Discutez, appelez, partagez vos moments avec vos proches.',
+          'image': request.build_absolute_uri(static('kozons/icon-512.png')), 'url': request.build_absolute_uri()}
+    parts = request.path.strip('/').split('/')
+    if len(parts) == 2 and parts[0] == 'invite':
+        from accounts.views import find_inviter
+        inviter = find_inviter(parts[1])
+        if inviter:
+            og['title'] = f'{inviter.name} vous invite sur Kozons'
+            og['description'] = 'Rejoignez-moi sur Kozons : messages, appels audio et vidéo, statuts et réunions, gratuitement.'
+    return og
 
 
 def manifest(request):

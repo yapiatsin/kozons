@@ -159,6 +159,32 @@ class ChatApiTests(TransactionTestCase):
         bad = SimpleUploadedFile('x.html', b'<script>', content_type='text/html')
         self.assertEqual(self.ca.post(f'/api/conversations/{cid}/messages', {'file': bad}).status_code, 400)
 
+    def test_voice_message_converted_with_waveform(self):
+        # Vocal Android (WebM) : converti en AAC lisible partout, forme d'onde et durée exactes du serveur.
+        import array
+        from unittest import mock
+
+        from django.core.files.base import ContentFile
+
+        from chat import audio
+        cid = self.direct()
+        webm = lambda: SimpleUploadedFile('vocal-1.webm', b'WEBM' + b'0' * 200, content_type='audio/webm')
+        with mock.patch.object(audio, 'convert_voice', return_value=(ContentFile(b'm4a', name='vocal-1.m4a'), 'AZf' * 16, 12.4)):
+            r = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'voice', 'duration': '11.0', 'waveform': 'B' * 48})
+        msg = r.json()
+        self.assertEqual((msg['kind'], msg['duration'], msg['waveform']), ('voice', 12.4, 'AZf' * 16))
+        self.assertTrue(msg['file'].endswith('.m4a'))
+        # Sans ffmpeg : fichier d'origine gardé, forme d'onde du navigateur acceptée si bien formée.
+        with mock.patch.object(audio, 'ffmpeg', return_value=None):
+            ok = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'voice', 'waveform': 'Af' * 24}).json()
+            bad = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'voice', 'waveform': '<script>'}).json()
+        self.assertEqual((ok['waveform'], bad['waveform']), ('Af' * 24, ''))
+        self.assertTrue(ok['file'].endswith('.webm'))
+        # Forme d'onde calculée depuis le son brut : 48 barres, la plus forte au maximum.
+        pcm = array.array('h', [0] * 4000 + [20000] * 4000).tobytes()
+        wave = audio.waveform_from_pcm(pcm)
+        self.assertEqual((len(wave), wave[0], wave[-1]), (48, 'A', 'f'))
+
     def test_forward_and_search(self):
         cid = self.direct()
         other = post(self.ca, 'conversations/direct', {'user_id': self.carol.pk}).json()['id']

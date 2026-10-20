@@ -106,7 +106,7 @@ function swipeToReply(row, onReply, disabled) {
     mode = null; armed = false; dx = 0;
   };
   row.addEventListener('touchstart', e => {
-    if (e.touches.length !== 1 || disabled()) { mode = 'off'; return; }
+    if (e.touches.length !== 1 || disabled() || e.target.closest('.vp-wave')) { mode = 'off'; return; }  // glisser sur un vocal = avancer
     sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; mode = null; armed = false;
   }, { passive: true });
   row.addEventListener('touchmove', e => {
@@ -265,7 +265,7 @@ function viewOnce(msg) {
       try {
         const { file, kind } = await api.post(`messages/${msg.id}/open`);
         msg.opened = true;
-        if (kind === 'voice') { const a = new Audio(file); a.play(); } else lightbox(file, kind);
+        if (kind === 'voice') { const a = new Audio(file); a.play().catch(() => toast('Lecture impossible', { type: 'error' })); } else lightbox(file, kind);
         window.dispatchEvent(new CustomEvent('kozons:rerender-message', { detail: msg }));
       } catch (e) { errorToast(e); }
     },
@@ -294,52 +294,243 @@ function pollView(msg) {
     h('div.muted.small.center', `${voters.size} votant${voters.size > 1 ? 's' : ''}`));
 }
 
-// Lecteur audio unique : un seul vocal joue à la fois, lecture enchaînée possible.
-let playing = null;
+// ------------------------------------------------------------------ messages vocaux (façon WhatsApp)
+//
+// Un seul élément <audio> pour toute l'application (au lieu d'un par message) : rien n'est téléchargé
+// avant d'appuyer sur lecture, un seul vocal joue à la fois, et la lecture continue même si la bulle
+// est redessinée. La durée et la forme d'onde viennent du serveur (vocal converti en AAC).
 
-export function voicePlayer(msg) {
-  const audio = new Audio();
-  audio.preload = 'metadata';
-  audio.src = msg.file;
-  const playBtn = h('button.vp-play', { type: 'button', 'aria-label': 'Lire' }, icon('play', 20));
-  const bar = h('input.vp-bar', { type: 'range', min: 0, max: 1000, value: 0 });
-  const time = h('span.vp-time', duration(msg.duration));
-  const speedBtn = h('button.vp-speed', { type: 'button' }, '1×');
-  const speeds = [1, 1.5, 2];
-  let speedIdx = 0;
-  const set = playingNow => clearIcon(playBtn, playingNow ? 'pause' : 'play');
-  playBtn.onclick = () => {
-    if (audio.paused) {
-      if (playing && playing !== audio) playing.pause();
-      playing = audio;
-      audio.play().catch(() => toast('Lecture impossible', { type: 'error' }));
-    } else audio.pause();
-  };
-  speedBtn.onclick = () => {
-    speedIdx = (speedIdx + 1) % speeds.length;
-    audio.playbackRate = speeds[speedIdx];
-    speedBtn.textContent = speeds[speedIdx] + '×';
-  };
-  audio.onplay = () => set(true);
-  audio.onpause = () => set(false);
-  audio.onended = () => { set(false); bar.value = 0; };
-  audio.ontimeupdate = () => {
-    const d = isFinite(audio.duration) ? audio.duration : msg.duration;
-    if (d) bar.value = (audio.currentTime / d) * 1000;
-    time.textContent = duration(audio.currentTime || d);
-  };
-  bar.oninput = () => {
-    const d = isFinite(audio.duration) ? audio.duration : msg.duration;
-    if (d) audio.currentTime = (bar.value / 1000) * d;
-  };
-  const who = msg.sender || state.me;
-  return h('div.voice',
-    msg.kind === 'voice' ? avatar(who.avatar, who.name, 40) : h('div.doc-icon', icon('volume', 22)),
-    playBtn, h('div.vp-track', bar, h('div.row.vp-foot', time, speedBtn)));
+const WAVE_LEVELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+const BARS = 46;  // barres affichées (la forme d'onde stockée en a 48) : bien séparées même sur petit écran
+const SPEEDS = [1, 1.5, 2];
+const voice = { audio: null, id: null, msg: null, loading: false, switching: false, subs: new Map(), pos: new Map(), msgs: new Map(), raf: 0 };
+let voiceSpeed = (() => { try { return SPEEDS.includes(+localStorage.getItem('kozons.voiceSpeed')) ? +localStorage.getItem('kozons.voiceSpeed') : 1; } catch (e) { return 1; } })();
+
+function playedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('kozons.voicePlayed')) || []); } catch (e) { return new Set(); }
+}
+function markPlayed(id) {
+  if (typeof id !== 'number') return;
+  const s = playedSet();
+  if (s.has(id)) return;
+  s.add(id);
+  try { localStorage.setItem('kozons.voicePlayed', JSON.stringify([...s].slice(-400))); } catch (e) { /* stockage indisponible */ }
 }
 
-function clearIcon(button, name) {
-  button.replaceChildren(icon(name, 20));
+/** Niveaux 0..1 des 48 barres : forme d'onde du serveur, sinon motif stable tiré de l'id. */
+function waveLevels(msg) {
+  const w = msg.waveform || '';
+  if (w) {
+    const raw = [...w].map(c => Math.max(0, WAVE_LEVELS.indexOf(c)) / 31);
+    return Array.from({ length: BARS }, (_, i) => {
+      const from = Math.floor(i * raw.length / BARS), to = Math.max(from + 1, Math.floor((i + 1) * raw.length / BARS));
+      return Math.max(...raw.slice(from, to));
+    });
+  }
+  let seed = (typeof msg.id === 'number' ? msg.id : 7) * 9301 + 49297;
+  return Array.from({ length: BARS }, () => { seed = (seed * 9301 + 49297) % 233280; return 0.25 + 0.6 * (seed / 233280); });
+}
+
+const voiceDuration = msg => {
+  const a = voice.audio;
+  if (a && voice.id === msg.id && isFinite(a.duration) && a.duration > 0) return a.duration;
+  return msg.duration || 0;
+};
+
+function emitVoice(id) {
+  const set = voice.subs.get(id);
+  if (!set) return;
+  for (const fn of [...set]) fn();
+}
+
+function tick() {
+  emitVoice(voice.id);
+  if (voice.audio && !voice.audio.paused) voice.raf = requestAnimationFrame(tick);
+}
+
+function engine() {
+  if (voice.audio) return voice.audio;
+  const a = new Audio();
+  a.preload = 'auto';
+  a.addEventListener('playing', () => { voice.loading = false; voice.switching = false; cancelAnimationFrame(voice.raf); tick(); });
+  a.addEventListener('waiting', () => { voice.loading = true; emitVoice(voice.id); });
+  a.addEventListener('pause', () => {
+    cancelAnimationFrame(voice.raf);
+    if (!voice.switching && voice.id !== null) voice.pos.set(voice.id, a.currentTime);  // reprise au même endroit
+    emitVoice(voice.id);
+  });
+  a.addEventListener('ended', () => {
+    const done = voice.id;
+    voice.pos.delete(done);
+    cancelAnimationFrame(voice.raf);
+    emitVoice(done);
+    playNextVoice(done);
+  });
+  a.addEventListener('error', () => {
+    if (!voice.id) return;
+    const id = voice.id;
+    voice.loading = false;
+    voice.id = null;
+    emitVoice(id);
+    toast('Impossible de lire ce message vocal. Vérifiez votre connexion.', { type: 'error' });
+  });
+  voice.audio = a;
+  return a;
+}
+
+export function playVoice(msg) {
+  const a = engine();
+  if (voice.id === msg.id) {
+    if (a.paused) a.play().catch(playFailed);
+    else a.pause();
+    return;
+  }
+  if (voice.id !== null && !a.paused) { voice.pos.set(voice.id, a.currentTime); a.pause(); }
+  const prev = voice.id;
+  voice.switching = true;
+  voice.id = msg.id;
+  voice.msg = msg;
+  voice.loading = true;
+  a.src = msg.file;
+  a.playbackRate = voiceSpeed;
+  const resume = voice.pos.get(msg.id) || 0;
+  if (resume) a.addEventListener('loadedmetadata', () => { try { a.currentTime = resume; } catch (e) { /* ignoré */ } }, { once: true });
+  // Doit suivre directement le toucher (iPhone) : aucun await avant play().
+  a.play().catch(playFailed);
+  markPlayed(msg.id);
+  if (prev !== null) emitVoice(prev);
+  emitVoice(msg.id);
+  mediaSession(msg);
+}
+
+function playFailed(e) {
+  if (e && e.name === 'AbortError') return;  // un autre vocal a été lancé entre-temps
+  voice.switching = false;
+  const id = voice.id;
+  voice.loading = false;
+  voice.id = null;
+  emitVoice(id);
+  toast(e && e.name === 'NotAllowedError' ? 'Appuyez à nouveau sur lecture.' : 'Ce message vocal ne peut pas être lu sur cet appareil.', { type: 'error' });
+}
+
+/** Vocal suivant de la discussion (messages consécutifs), comme WhatsApp. */
+function playNextVoice(id) {
+  const row = document.querySelector(`.msg-row[data-id="${id}"]`);
+  let next = row && row.nextElementSibling;
+  while (next && !next.classList.contains('msg-row')) next = next.nextElementSibling;
+  const el = next && next.querySelector('.voice[data-voice]');
+  const msg = el && voice.msgs.get(+el.dataset.voice);
+  if (msg && msg.kind === 'voice') playVoice(msg);
+  else if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
+}
+
+/** Commandes sur l'écran verrouillé / la notification média du téléphone. */
+function mediaSession(msg) {
+  if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return;
+  const who = msg.sender || state.me;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: 'Message vocal', artist: who ? who.name : 'Kozons', album: 'Kozons',
+      artwork: who && who.avatar ? [{ src: who.avatar, sizes: '256x256' }] : [{ src: '/static/kozons/icon-192.png', sizes: '192x192', type: 'image/png' }],
+    });
+    const a = engine();
+    navigator.mediaSession.setActionHandler('play', () => a.play().catch(() => {}));
+    navigator.mediaSession.setActionHandler('pause', () => a.pause());
+    navigator.mediaSession.setActionHandler('seekbackward', () => { a.currentTime = Math.max(0, a.currentTime - 5); });
+    navigator.mediaSession.setActionHandler('seekforward', () => { a.currentTime = Math.min(voiceDuration(voice.msg), a.currentTime + 5); });
+  } catch (e) { /* non pris en charge */ }
+}
+
+export function voicePlayer(msg) {
+  voice.msgs.set(msg.id, msg);
+  const mine = msg.sender_id === state.me.id;
+  const levels = waveLevels(msg);
+  const bars = () => h('div.vp-bars', levels.map(l => h('i', { style: { height: Math.max(12, Math.round(l * 100)) + '%' } })));
+  const played = bars();
+  played.classList.add('vp-played');
+  const thumb = h('span.vp-thumb');
+  const wave = h('div.vp-wave', { role: 'slider', tabindex: 0, 'aria-label': 'Position dans le message vocal', 'aria-valuemin': 0 }, bars(), played, thumb);
+  const time = h('span.vp-time');
+  const playBtn = h('button.vp-play', { type: 'button', 'aria-label': 'Lire le message vocal', onclick: e => { e.stopPropagation(); playVoice(msg); } });
+  const speedBtn = h('button.vp-speed', { type: 'button', 'aria-label': 'Vitesse de lecture', onclick: e => {
+    e.stopPropagation();
+    voiceSpeed = SPEEDS[(SPEEDS.indexOf(voiceSpeed) + 1) % SPEEDS.length];
+    try { localStorage.setItem('kozons.voiceSpeed', String(voiceSpeed)); } catch (err) { /* stockage indisponible */ }
+    if (voice.audio) voice.audio.playbackRate = voiceSpeed;
+    paint();
+  } });
+  // Disposition WhatsApp : ▶ · onde (avec le point) · photo + micro ; la durée sous l'onde.
+  // Mes vocaux : la photo passe à gauche. Pendant la lecture, la vitesse remplace la photo.
+  const who = msg.sender || state.me;
+  const side = h('div.vp-side',
+    msg.kind === 'voice' ? avatar(who.avatar, who.name, 44) : h('div.doc-icon', icon('volume', 22)),
+    msg.kind === 'voice' ? h('span.vp-mic', icon('mic', 18)) : null, speedBtn);
+  const el = h('div.voice' + (mine ? '.mine' : ''), { dataset: { voice: msg.id } },
+    side, playBtn, h('div.vp-main', wave, h('div.vp-foot', time)));
+
+  let lastIcon = '';
+  function paint() {
+    const current = voice.id === msg.id;
+    const a = voice.audio;
+    const playing = current && a && !a.paused;
+    const loading = current && voice.loading;
+    const d = voiceDuration(msg);
+    const t = current && a ? a.currentTime : (voice.pos.get(msg.id) || 0);
+    const p = d ? Math.min(1, t / d) : 0;
+    played.style.clipPath = `inset(0 ${100 - p * 100}% 0 0)`;
+    thumb.style.left = p * 100 + '%';
+    wave.setAttribute('aria-valuenow', Math.round(t));
+    wave.setAttribute('aria-valuemax', Math.round(d));
+    time.textContent = duration(playing || t >= 1 ? t : d);
+    const ic = loading ? 'load' : playing ? 'pause' : 'play';
+    if (ic !== lastIcon) {
+      lastIcon = ic;
+      playBtn.replaceChildren(ic === 'load' ? h('span.vp-spin') : icon(ic, 26));
+      playBtn.setAttribute('aria-label', playing ? 'Mettre en pause' : 'Lire le message vocal');
+    }
+    // Pendant la lecture, la vitesse remplace la photo (comme WhatsApp).
+    el.classList.toggle('active', current && (playing || loading || t > 0));
+    el.classList.toggle('playing', !!playing);
+    el.style.setProperty('--p', p.toFixed(4));
+    speedBtn.textContent = String(voiceSpeed).replace('.', ',') + '×';
+    el.classList.toggle('unplayed', !mine && typeof msg.id === 'number' && !playedSet().has(msg.id));
+  }
+
+  // Avancer / reculer en touchant ou en glissant sur la forme d'onde.
+  wave.addEventListener('pointerdown', e => {
+    e.stopPropagation();
+    const d = voiceDuration(msg);
+    if (!d) return;
+    wave.setPointerCapture(e.pointerId);
+    const seek = ev => {
+      const r = wave.getBoundingClientRect();
+      const t = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)) * d;
+      if (voice.id === msg.id && voice.audio) voice.audio.currentTime = t;
+      else voice.pos.set(msg.id, t);
+      paint();
+    };
+    seek(e);
+    const up = () => { wave.removeEventListener('pointermove', seek); wave.removeEventListener('pointerup', up); wave.removeEventListener('pointercancel', up); };
+    wave.addEventListener('pointermove', seek);
+    wave.addEventListener('pointerup', up);
+    wave.addEventListener('pointercancel', up);
+  });
+  wave.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = e.key === 'ArrowRight' ? 5 : -5;
+    if (voice.id === msg.id && voice.audio) voice.audio.currentTime = Math.max(0, voice.audio.currentTime + step);
+    else voice.pos.set(msg.id, Math.max(0, (voice.pos.get(msg.id) || 0) + step));
+    paint();
+  });
+
+  // Abonnement à l'état du lecteur partagé ; retiré quand la bulle n'est plus affichée.
+  const fn = () => { if (!el.isConnected && voice.id !== msg.id) { unsubscribe(); return; } paint(); };
+  const unsubscribe = () => { const set = voice.subs.get(msg.id); if (set) { set.delete(fn); if (!set.size) voice.subs.delete(msg.id); } };
+  if (!voice.subs.has(msg.id)) voice.subs.set(msg.id, new Set());
+  voice.subs.get(msg.id).add(fn);
+  paint();
+  return el;
 }
 
 async function startChatWith(userId) {

@@ -8,6 +8,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# ffmpeg : conversion des messages vocaux en AAC, lisible sur tous les téléphones (iPhone compris).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dépendances d'abord : la couche reste en cache tant que requirements.txt ne change pas.
 COPY requirements.txt .
 RUN pip install -r requirements.txt

@@ -2,6 +2,7 @@
 import { api } from '../api.js';
 import { bus, state } from '../store.js';
 import { h, clear, icon, btn, avatar, ago, toast, errorToast, pickFiles, modal, confirmDialog, QUICK_REACTIONS, spinner } from '../ui.js';
+import { editImage } from '../imageeditor.js';
 
 export async function fetchStories() {
   const { results } = await api.get('stories');
@@ -60,10 +61,31 @@ export function openViewer(groups, groupIndex, onClose, { storyIndex } = {}) {
   function close() {
     clearInterval(timer);
     document.removeEventListener('keydown', onKey);
+    offViewed();
+    if (window.visualViewport) window.visualViewport.removeEventListener('resize', onViewport);
     layer.remove();
     onClose && onClose();
   }
+  // Téléphone : le clavier ne doit pas cacher la barre de réponse (iPhone ne redimensionne pas la page).
+  function onViewport() {
+    const vv = window.visualViewport;
+    const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    layer.style.setProperty('--sv-kb', kb + 'px');
+  }
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', onViewport);
+  // Quelqu'un vient de voir ma story : compteur à jour sans recharger.
+  const offViewed = bus.on('story.viewed', ({ story_id }) => {
+    if (!current || current.id !== story_id || !groups[gi].is_me) return;
+    api.get(`stories/${story_id}/viewers`).then(({ results }) => {
+      current.viewers = results;
+      current.view_count = results.length;
+      if (groups[gi].stories[si] === current) paintViewCount();
+    }).catch(() => {});
+  });
+  let paintViewCount = () => {};
   function onKey(e) {
+    if (e.target.tagName === 'INPUT' && e.key !== 'Escape') return;
+    if (document.querySelector('#overlay-root .modal-back')) return;  // liste des vues ouverte
     if (e.key === 'Escape') close();
     else if (e.key === 'ArrowRight') next();
     else if (e.key === 'ArrowLeft') prev();
@@ -128,30 +150,52 @@ export function openViewer(groups, groupIndex, onClose, { storyIndex } = {}) {
     clear(stage, media, current.kind !== 'text' && current.text ? h('div.sv-caption', current.text) : null);
 
     if (isMine) {
-      clear(footer, h('button.sv-viewers', { type: 'button', onclick: () => showViewers(current) }, icon('eye', 20), ` ${current.view_count || 0} vue${current.view_count > 1 ? 's' : ''}`));
+      const story = current;
+      const count = h('span');
+      paintViewCount = () => { count.textContent = `${story.view_count || 0} vue${story.view_count > 1 ? 's' : ''}`; };
+      paintViewCount();
+      clear(footer, h('button.sv-viewers', { type: 'button', onclick: () => {
+        togglePause(true);
+        showViewers(story, () => togglePause(false));
+      } }, icon('eye', 20), count));
     } else {
-      const input = h('input.sv-reply', { placeholder: `Répondre à ${group.user.name.split(' ')[0]}…`, maxlength: 1000 });
-      input.addEventListener('focus', () => togglePause(true));
-      input.addEventListener('blur', () => { if (!input.value) togglePause(false); });
-      input.addEventListener('keydown', async e => {
-        if (e.key !== 'Enter' || !input.value.trim()) return;
+      // Barre de réponse façon WhatsApp : « Répondre » + 2 réactions rapides dans la bulle, cœur à côté ;
+      // dès qu'on écrit, les réactions s'effacent et le bouton d'envoi remplace le cœur.
+      const story = current;
+      const input = h('input.sv-reply', { placeholder: 'Répondre', maxlength: 1000, enterkeyhint: 'send', 'aria-label': `Répondre à ${group.user.name}` });
+      const send = async () => {
         const text = input.value.trim();
+        if (!text) return;
         input.value = '';
+        paintTyping();
         input.blur();
-        await replyToStory(group.user, current, text);
-      });
-      const like = h('button.sv-like' + (current.liked ? '.liked' : ''), {
-        type: 'button', 'aria-label': "J'aime",
+        await replyToStory(group.user, story, text);
+      };
+      input.addEventListener('focus', () => { togglePause(true); footer.classList.add('typing'); });
+      input.addEventListener('blur', () => { footer.classList.remove('typing'); if (!input.value) togglePause(false); });
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+      const like = h('button.sv-round.sv-like' + (story.liked ? '.liked' : ''), {
+        type: 'button', 'aria-label': "J'aime", title: "J'aime",
         onclick: async () => {
           try {
-            const { liked } = await api.post(`stories/${current.id}`, { action: 'like' });
-            current.liked = liked;
+            const { liked } = await api.post(`stories/${story.id}`, { action: 'like' });
+            story.liked = liked;
             like.classList.toggle('liked', liked);
           } catch (e) { errorToast(e); }
         },
-      }, icon('heart', 26));
-      clear(footer, h('div.sv-quick', QUICK_REACTIONS.slice(0, 5).map(e => h('button', { type: 'button', onclick: () => replyToStory(group.user, current, e) }, e))),
-        h('div.row.gap', input, like, btn('send', 'Envoyer', () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })))));
+      }, icon('heart', 24));
+      const sendBtn = h('button.sv-round.sv-send.hidden', { type: 'button', 'aria-label': 'Envoyer', onmousedown: e => e.preventDefault(), onclick: send }, icon('send', 22));
+      const quick = h('span.sv-pill-quick', ['😍', '😂'].map(e => h('button', { type: 'button', title: e, onclick: () => replyToStory(group.user, story, e) }, e)));
+      const paintTyping = () => {
+        const typing = !!input.value.trim();
+        quick.classList.toggle('hidden', typing);
+        sendBtn.classList.toggle('hidden', !typing);
+        like.classList.toggle('hidden', typing);
+      };
+      input.addEventListener('input', paintTyping);
+      clear(footer,
+        h('div.sv-quick', QUICK_REACTIONS.slice(0, 5).map(e => h('button', { type: 'button', title: e, onclick: () => replyToStory(group.user, story, e) }, e))),
+        h('div.sv-replybar', h('label.sv-pill', input, quick), like, sendBtn));
       if (!current.seen) {
         current.seen = true;
         api.post(`stories/${current.id}`, { action: 'view' }).catch(() => {});
@@ -193,15 +237,22 @@ async function replyToStory(user, story, text) {
   } catch (e) { errorToast(e); }
 }
 
-async function showViewers(story) {
-  const body = h('div.pick-list', spinner());
-  modal(body, { title: 'Vues' });
-  try {
-    const { results } = await api.get(`stories/${story.id}/viewers`);
-    clear(body, results.length ? results.map(u => h('div.pick-item', avatar(u.avatar, u.name, 40),
-      h('div.pick-text', h('div.strong', u.name), h('div.muted.small', ago(u.viewed_at))),
-      u.liked ? h('span.liked-heart', icon('heart', 18)) : null)) : h('p.muted.pad', 'Personne pour le moment.'));
-  } catch (e) { clear(body, h('p.muted', e.message)); }
+/** Liste « Vues » : affichée aussitôt avec les vues déjà reçues (jointes à mes stories),
+ *  puis mise à jour en arrière-plan et en temps réel. */
+function showViewers(story, onClose) {
+  const body = h('div.pick-list');
+  const paint = list => clear(body, list.length ? list.map(u => h('div.pick-item', avatar(u.avatar, u.name, 40),
+    h('div.pick-text', h('div.strong', u.name), h('div.muted.small', ago(u.viewed_at))),
+    u.liked ? h('span.liked-heart', icon('heart', 18)) : null)) : h('p.muted.pad', 'Personne pour le moment.'));
+  const refresh = () => api.get(`stories/${story.id}/viewers`).then(({ results }) => {
+    story.viewers = results;
+    story.view_count = results.length;
+    paint(results);
+  }).catch(e => { if (!story.viewers) clear(body, h('p.muted', e.message)); });
+  if (story.viewers) paint(story.viewers); else clear(body, spinner());
+  const off = bus.on('story.viewed', ({ story_id }) => { if (story_id === story.id) refresh(); });
+  modal(body, { title: `Vues · ${story.view_count || 0}`, cls: 'sv-viewers-sheet', onClose: () => { off(); onClose && onClose(); } });
+  refresh();
 }
 
 // ------------------------------------------------------------------ création
@@ -209,7 +260,7 @@ async function showViewers(story) {
 const BACKGROUNDS = ['#128C7E', '#25D366', '#34B7F1', '#7c4dff', '#e1306c', '#ff9800', '#f44336', '#3f51b5', '#212121', 'linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045)'];
 
 export function createStoryDialog(onDone) {
-  let file = null;
+  let file = null, adjust = null;
   let bgIndex = 0;
   const preview = h('div.story-create-preview');
   const text = h('textarea.story-text-input', { placeholder: 'Tapez un statut', maxlength: 700, rows: 3 });
@@ -218,6 +269,7 @@ export function createStoryDialog(onDone) {
   const setBg = () => { preview.style.background = BACKGROUNDS[bgIndex]; };
   const textMode = () => {
     file = null;
+    if (adjust) adjust.classList.add('hidden');
     clear(preview, text);
     setBg();
     caption.classList.add('hidden');
@@ -225,14 +277,23 @@ export function createStoryDialog(onDone) {
   };
   textMode();
 
-  const pick = async () => {
-    const [f] = await pickFiles({ accept: 'image/*,video/*' });
-    if (!f) return;
+  adjust = h('button.btn.ghost.story-adjust.hidden', { type: 'button', onclick: async () => {
+    const edited = await editImage(file);
+    if (edited) showFile(edited);
+  } }, icon('crop', 18), ' Ajuster');
+  const showFile = f => {
     file = f;
     const url = URL.createObjectURL(f);
     preview.style.background = '#000';
-    clear(preview, f.type.startsWith('video/') ? h('video', { src: url, controls: true, autoplay: true, muted: true }) : h('img', { src: url, alt: '' }));
+    const isImage = f.type.startsWith('image/') && f.type !== 'image/gif';
+    clear(preview, f.type.startsWith('video/') ? h('video', { src: url, controls: true, autoplay: true, muted: true }) : h('img', { src: url, alt: '' }),
+      isImage ? adjust : null);
+    adjust.classList.toggle('hidden', !isImage);
     caption.classList.remove('hidden');
+  };
+  const pick = async () => {
+    const [f] = await pickFiles({ accept: 'image/*,video/*' });
+    if (f) showFile(f);
   };
 
   const share = h('button.btn.primary', { type: 'button' }, 'Partager');

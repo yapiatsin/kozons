@@ -1124,54 +1124,157 @@ function setupDrop(target) {
 
 // ------------------------------------------------------------------ messages vocaux
 
+// Formats préférés : AAC (lisible partout) puis Opus. Le serveur convertit de toute façon en AAC.
+const REC_TYPES = ['audio/mp4;codecs=mp4a.40.2', 'audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm'];
+const WAVE_LEVELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+
+/** Niveaux enregistrés (0..1) → 48 barres codées en lettres (envoyées avec le vocal). */
+function encodeWaveform(levels) {
+  if (!levels.length) return '';
+  const out = [];
+  for (let i = 0; i < 48; i++) {
+    const a = Math.floor(i * levels.length / 48), b = Math.max(a + 1, Math.floor((i + 1) * levels.length / 48));
+    out.push(Math.max(...levels.slice(a, b)));
+  }
+  const top = Math.max(...out) || 1;
+  return out.map(v => WAVE_LEVELS[Math.min(31, Math.round(Math.pow(v / top, 0.6) * 31))]).join('');
+}
+
+// Enregistrement façon WhatsApp : durée + onde en direct + « vue unique », puis
+// corbeille · Pause (écouter avant d'envoyer, reprendre) · Envoyer.
 async function startRecording() {
   if (!pane || pane.recorder) return;
   if (!navigator.mediaDevices || !window.MediaRecorder) return toast("L'enregistrement audio n'est pas pris en charge par ce navigateur.", { type: 'error' });
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
-  catch (e) { return toast("Accès au micro refusé.", { type: 'error' }); }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+  catch (e) { return toast('Accès au micro refusé.', { type: 'error' }); }
   if (!pane) { stream.getTracks().forEach(t => t.stop()); return; }
-  const mime = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm'].find(t => MediaRecorder.isTypeSupported(t)) || '';
+  const mime = REC_TYPES.find(t => MediaRecorder.isTypeSupported(t)) || '';
   const rec = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
   const chunks = [];
+  const levels = [];
   const started = Date.now();
-  let cancelled = false, paused = false, pausedFor = 0, pausedAt = 0;
+  let cancelled = false, paused = false, pausedFor = 0, pausedAt = 0, viewOnce = false, preview = null;
   rec.ondataavailable = e => e.data.size && chunks.push(e.data);
   const convId = pane.convId;
   const reply = pane.replyTo;
   const elapsed = () => (Date.now() - started - pausedFor - (paused ? Date.now() - pausedAt : 0)) / 1000;
-  rec.onstop = () => {
+
+  // Niveau du micro (onde en direct + forme d'onde du message) : un seul petit analyseur, 12 mesures/s.
+  let ctx = null, analyser = null, buf = null;
+  try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    buf = new Uint8Array(analyser.fftSize);
+    ctx.createMediaStreamSource(stream).connect(analyser);
+  } catch (e) { analyser = null; }
+  const canvas = h('canvas.rec-wave');
+  const draw = () => {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, hh = canvas.clientHeight;
+    if (!w) return;
+    if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(hh * dpr); }
+    const g = canvas.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, hh);
+    g.fillStyle = getComputedStyle(canvas).color;
+    const step = 4, n = Math.floor(w / step);
+    const shown = levels.slice(-n);
+    shown.forEach((v, i) => {
+      const bh = Math.max(2, Math.min(1, v * 4) * hh);
+      g.fillRect(w - (shown.length - i) * step, (hh - bh) / 2, 2, bh);
+    });
+    for (let x = w - shown.length * step - step; x > 0; x -= step) g.fillRect(x, hh / 2 - 1, 2, 2);  // pointillés
+  };
+  const sample = () => {
+    if (paused) return;
+    let v = 0.0125;
+    if (analyser) {
+      analyser.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) { const x = (buf[i] - 128) / 128; sum += x * x; }
+      v = Math.sqrt(sum / buf.length);  // niveau brut : la forme d'onde est normalisée à l'envoi
+    }
+    levels.push(v);
+    draw();
+  };
+
+  const finish = () => {
     stream.getTracks().forEach(t => t.stop());
     clearInterval(timer);
     clearInterval(typingTimer);
+    if (ctx) ctx.close().catch(() => {});
+    if (preview) { preview.pause(); URL.revokeObjectURL(preview.src); }
     send('typing', { conversation_id: convId, state: 'stop' });
     if (pane) { pane.recorder = null; buildComposer(); }
+  };
+  rec.onstop = () => {
+    finish();
     if (cancelled || !chunks.length) return;
     const secs = elapsed();
     if (secs < 0.8) return toast('Message vocal trop court.');
     const type = rec.mimeType || 'audio/webm';
     const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
-    const file = new File(chunks, `vocal-${Date.now()}.${ext}`, { type });
-    sendMessage(convId, { kind: 'voice', duration: secs.toFixed(1), reply_to: reply && reply.id }, { file }).catch(errorToast);
+    const file = new File(chunks, `vocal-${Date.now()}.${ext}`, { type: type.split(';')[0] });
+    sendMessage(convId, { kind: 'voice', duration: secs.toFixed(1), waveform: encodeWaveform(levels), view_once: viewOnce || undefined, reply_to: reply && reply.id }, { file }).catch(errorToast);
     if (pane) setReply(null);
   };
   rec.start(250);
 
   const time = h('span.rec-time', '0:00');
-  const pauseBtn = btn('pause', 'Pause', () => {
-    if (!paused) { rec.pause(); paused = true; pausedAt = Date.now(); pauseBtn.replaceChildren(icon('mic', 22)); }
-    else { rec.resume(); paused = false; pausedFor += Date.now() - pausedAt; pauseBtn.replaceChildren(icon('pause', 22)); }
-  });
-  const timer = setInterval(() => { time.textContent = duration(elapsed()); if (elapsed() > 900) rec.stop(); }, 250);
+  const timer = setInterval(() => {
+    sample();
+    time.textContent = duration(elapsed());
+    if (elapsed() > 900) rec.stop();          // 15 minutes au plus
+  }, 80);
   send('typing', { conversation_id: convId, state: 'recording' });
-  const typingTimer = setInterval(() => send('typing', { conversation_id: convId, state: 'recording' }), 4000);
+  const typingTimer = setInterval(() => { if (!paused) send('typing', { conversation_id: convId, state: 'recording' }); }, 4000);
 
-  pane.recorder = { cancel: () => { cancelled = true; if (rec.state !== 'inactive') rec.stop(); } };
-  clear(pane.composer, h('div.composer-row.recording',
-    btn('trash', 'Annuler', () => pane.recorder && pane.recorder.cancel()),
-    h('div.rec-indicator', h('span.rec-dot'), time, h('span.muted', ' Enregistrement…')),
-    pauseBtn,
-    h('button.send-btn', { type: 'button', 'aria-label': 'Envoyer le vocal', onclick: () => rec.state !== 'inactive' && rec.stop() }, icon('send', 22))));
+  // Pause : on peut réécouter ce qui est enregistré, puis reprendre.
+  const listenBtn = h('button.rec-listen.hidden', { type: 'button', 'aria-label': 'Écouter' }, icon('play', 22));
+  const pauseBtn = h('button.rec-pause', { type: 'button' });
+  const paintPause = () => {
+    pauseBtn.replaceChildren(icon(paused ? 'mic' : 'pause', 22), h('span', paused ? 'Reprendre' : 'Pause'));
+    pauseBtn.classList.toggle('resume', paused);
+    listenBtn.classList.toggle('hidden', !paused);
+    row.classList.toggle('paused', paused);
+  };
+  pauseBtn.onclick = () => {
+    if (!paused) {
+      rec.pause(); paused = true; pausedAt = Date.now();
+      try { rec.requestData(); } catch (e) { /* ignoré */ }
+      send('typing', { conversation_id: convId, state: 'stop' });
+    } else {
+      if (preview) preview.pause();
+      rec.resume(); paused = false; pausedFor += Date.now() - pausedAt;
+    }
+    paintPause();
+  };
+  listenBtn.onclick = () => {
+    if (preview && !preview.paused) { preview.pause(); return; }
+    if (preview) URL.revokeObjectURL(preview.src);
+    preview = new Audio(URL.createObjectURL(new Blob(chunks, { type: rec.mimeType || 'audio/webm' })));
+    preview.onplay = () => listenBtn.replaceChildren(icon('pause', 22));
+    preview.onpause = preview.onended = () => listenBtn.replaceChildren(icon('play', 22));
+    preview.play().catch(() => toast('Écoute indisponible sur cet appareil : envoyez ou reprenez.'));
+  };
+  const onceBtn = h('button.rec-once', { type: 'button', title: 'Vue unique', 'aria-label': 'Vue unique', 'aria-pressed': 'false', onclick: () => {
+    viewOnce = !viewOnce;
+    onceBtn.classList.toggle('active', viewOnce);
+    onceBtn.setAttribute('aria-pressed', String(viewOnce));
+    toast(viewOnce ? 'Vue unique : le vocal ne pourra être écouté qu’une fois.' : 'Vue unique désactivée.');
+  } }, '1');
+
+  pane.recorder = { cancel: () => { cancelled = true; if (rec.state !== 'inactive') rec.stop(); else finish(); } };
+  const row = h('div.rec-panel',
+    h('div.rec-top', h('span.rec-dot'), time, listenBtn, canvas, onceBtn),
+    h('div.rec-actions',
+      h('button.rec-trash', { type: 'button', 'aria-label': 'Supprimer', title: 'Supprimer', onclick: () => pane.recorder && pane.recorder.cancel() }, icon('trash', 22)),
+      pauseBtn,
+      h('button.send-btn.rec-send', { type: 'button', 'aria-label': 'Envoyer le vocal', onclick: () => rec.state !== 'inactive' && rec.stop() }, icon('send', 22))));
+  paintPause();
+  clear(pane.composer, row);
 }
 
 export { insertMessage };

@@ -93,8 +93,9 @@ function busy(button, fn) {
 
 // ------------------------------------------------------------------ écrans
 
-export function renderAuth(root, onDone, { notice = '' } = {}) {
+export function renderAuth(root, onDone, { notice = '', invite = '' } = {}) {
   const card = h('div.auth-card');
+  let inviter = null;  // { name, username, avatar } si la page vient d'un lien d'invitation
   const tagline = () => h('p.auth-tagline', 'Discutez, appelez, partagez vos moments. Messagerie en temps réel, appels vidéo, stories, publications et reels — au même endroit.');
   const finish = (user, path, remember = false) => {
     history.replaceState({}, '', path || location.pathname);
@@ -152,14 +153,18 @@ export function renderAuth(root, onDone, { notice = '' } = {}) {
           try {
             const { user } = await api.post('auth/register', {
               username: username.value.trim(), email: email.value.trim(),
-              display_name: displayName.value.trim(), password: pw.input.value,
+              display_name: displayName.value.trim(), password: pw.input.value, invite: inviter ? invite : undefined,
             });
-            finish(user, '/settings', true);  // inscription : appareil mémorisé
+            try { localStorage.removeItem('kozons.invite'); } catch (e) { /* ignoré */ }
+            // Venu par une invitation : direction « Retrouver des amis » (l'ami qui invite est déjà ajouté).
+            finish(user, inviter ? '/people' : '/settings', true);  // inscription : appareil mémorisé
           } catch (err) { error.textContent = err.message; }
         })();
       },
     }, username, email, displayName, pw.el, passwordChecklist(pw.input), error, submit);
     clear(card,
+      inviter ? h('div.auth-invite', inviter.avatar ? h('img', { src: inviter.avatar, alt: '' }) : h('span.auth-invite-ic', inviter.name.slice(0, 1).toUpperCase()),
+        h('div', h('strong', `${inviter.name} vous invite sur Kozons`), h('small', 'Inscrivez-vous : vous serez amis automatiquement.'))) : null,
       h('h2', 'Créer un compte'),
       form,
       h('p.auth-switch', 'Vous avez un compte ? ', link('Connectez-vous', () => showLogin())));
@@ -284,4 +289,9 @@ export function renderAuth(root, onDone, { notice = '' } = {}) {
         h('li', '📸 Publications, reels et découverte'))),
     card));
   showLogin('', notice);
+  // Lien d'invitation : bandeau « X vous invite » et formulaire d'inscription ouvert directement.
+  if (invite) {
+    api.get('invite/' + encodeURIComponent(invite)).then(r => { inviter = r.inviter; showRegister(); })
+      .catch(() => { try { localStorage.removeItem('kozons.invite'); } catch (e) { /* ignoré */ } });
+  }
 }

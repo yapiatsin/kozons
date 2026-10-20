@@ -13,6 +13,8 @@ const ROUTES = [
   [/^\/$/, () => import('./views/chats.js'), () => ({})],
   [/^\/chats\/(\d+)$/, () => import('./views/chats.js'), m => ({ id: +m[1] })],
   [/^\/status$/, () => import('./views/status.js'), () => ({})],
+  [/^\/people$/, () => import('./views/people.js'), () => ({})],
+  [/^\/invite\/([\w-]+)$/, () => import('./views/people.js'), m => ({ invite: m[1] })],
   [/^\/calls$/, () => import('./views/calls.js'), () => ({ page: true })],
   [/^\/feed$/, () => import('./views/feed.js'), () => ({})],
   [/^\/explore$/, () => import('./views/explore.js'), () => ({ q: new URLSearchParams(location.search).get('q') || '' })],
@@ -48,7 +50,7 @@ const ROUTES = [
 //  - « Moi » (téléphone) : profil, notifications, messages importants, paramètres.
 const SOCIAL_VIEWS = ['feed', 'explore', 'reels', 'live'];
 const SERVICE_VIEWS = ['meet', 'shop', 'brady'];
-const ME_VIEWS = ['profile', 'notifications', 'settings'];
+const ME_VIEWS = ['profile', 'notifications', 'settings', 'people'];
 const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
 let currentView = '';
 
@@ -90,7 +92,14 @@ function showAuth() {
       sessionStorage.removeItem('kozons.idleLogout');
     }
   } catch (e) { /* ignoré */ }
-  renderAuth(root, (user, remember) => { state.remember = !!remember; start(user); }, { notice });
+  // Lien d'invitation (kozonstic.com/invite/<code>) : retenu jusqu'à l'inscription.
+  let invite = '';
+  const m = location.pathname.match(/^\/invite\/([\w-]+)$/);
+  try {
+    if (m) localStorage.setItem('kozons.invite', m[1]);
+    invite = m ? m[1] : localStorage.getItem('kozons.invite') || '';
+  } catch (e) { invite = m ? m[1] : ''; }
+  renderAuth(root, (user, remember) => { state.remember = !!remember; start(user); }, { notice, invite });
 }
 
 async function start(me) {
@@ -188,6 +197,7 @@ function meMenu() {
   return [
     { label: 'Mon profil', icon: 'user', active: location.pathname === '/u/' + state.me.username, action: () => go('/u/' + state.me.username) },
     { label: 'Notifications', icon: 'heart', badge: n, active: currentView === 'notifications', action: () => go('/notifications') },
+    { label: 'Inviter / retrouver des amis', icon: 'users', active: currentView === 'people', action: () => go('/people') },
     { label: 'Messages importants', icon: 'star', action: () => go('/starred') },
     { label: 'Paramètres', icon: 'settings', active: currentView === 'settings', action: () => go('/settings') },
   ];
@@ -278,7 +288,7 @@ async function route() {
   if (!found) return go('/', { replace: true });
   const [loader, params] = found;
   const module = await loader();
-  const key = Object.entries({ '/': 'chats', '/chats': 'chats', '/status': 'status', '/calls': 'calls', '/feed': 'feed', '/explore': 'explore', '/reels': 'reels', '/live': 'live', '/meet': 'meet', '/shop': 'shop', '/brady': 'brady', '/notifications': 'notifications', '/settings': 'settings', '/u/': 'profile' })
+  const key = Object.entries({ '/': 'chats', '/chats': 'chats', '/status': 'status', '/calls': 'calls', '/feed': 'feed', '/explore': 'explore', '/reels': 'reels', '/live': 'live', '/meet': 'meet', '/shop': 'shop', '/brady': 'brady', '/people': 'people', '/notifications': 'notifications', '/settings': 'settings', '/u/': 'profile' })
     .find(([p]) => p === '/' ? path === '/' : path.startsWith(p));
   currentView = key ? key[1] : '';
   const group = SOCIAL_VIEWS.includes(currentView) ? 'social' : SERVICE_VIEWS.includes(currentView) ? 'services' : null;

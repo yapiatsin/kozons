@@ -19,6 +19,7 @@ PUSH_VERBS = {
     'follow': 'a commencé à vous suivre.', 'follow_request': 'souhaite vous suivre.',
     'follow_accept': "a accepté votre demande d'abonnement.", 'mention': 'vous a mentionné(e) :',
     'comment_like': 'a aimé votre commentaire :', 'story_like': 'a aimé votre story.',
+    'invite_joined': 'a rejoint Kozons grâce à votre invitation. Vous êtes maintenant amis !',
 }
 
 MENTION_RE = re.compile(r'@([a-zA-Z0-9._]{3,30})')
@@ -141,7 +142,13 @@ def story_data(s, viewer):
     }
     if s.user_id == viewer.pk:
         data['view_count'] = getattr(s, 'view_count', 0)
+        if hasattr(s, 'viewer_list'):
+            data['viewers'] = s.viewer_list
     return data
+
+
+def viewer_rows(views, viewer):
+    return [dict(user_brief(v.user, viewer), liked=v.liked, viewed_at=v.viewed_at.isoformat()) for v in views]
 
 
 def notification_data(n, viewer):
@@ -295,19 +302,84 @@ def toggle_close_friend(request, user_id):
     return {'close_friend': created}
 
 
+def connections(user_ids):
+    """Liens d'amitié : abonnements acceptés (dans un sens ou l'autre) et discussions privées.
+    {user_id: set(ids liés)} pour chaque id demandé."""
+    from chat.models import Participant
+    ids = set(user_ids)
+    links = {u: set() for u in ids}
+    for a, b in Follow.objects.filter(Q(follower_id__in=ids) | Q(following_id__in=ids), accepted=True).values_list('follower_id', 'following_id'):
+        if a in links:
+            links[a].add(b)
+        if b in links:
+            links[b].add(a)
+    direct = Participant.objects.filter(user_id__in=ids, conversation__kind='direct').values('conversation_id')
+    pairs = Participant.objects.filter(conversation_id__in=direct).values_list('conversation_id', 'user_id')
+    members = {}
+    for conv, uid in pairs:
+        members.setdefault(conv, set()).add(uid)
+    for group in members.values():
+        for u in group & ids:
+            links[u] |= group - {u}
+    return links
+
+
+def suggestion_list(user, limit=20):
+    """« Vous connaissez peut-être » (comme Facebook) : amis de vos amis, classés par amis en commun ;
+    puis les personnes qui vous suivent sans que vous les suiviez ; puis les nouveaux membres."""
+    from .models import HiddenSuggestion
+    from chat.models import Participant
+    friends = connections([user.pk])[user.pk]
+    # Déjà liés : comptes que je suis (ou demandés) et contacts de discussion privée. Ceux qui me suivent
+    # sans que je les suive restent proposés (« Vous suit »), comme sur Facebook.
+    direct = Participant.objects.filter(user=user, conversation__kind='direct').values('conversation_id')
+    contacts = set(Participant.objects.filter(conversation_id__in=direct).values_list('user_id', flat=True))
+    excluded = (contacts | {user.pk} | blocked_ids(user)
+                | set(Follow.objects.filter(follower=user).values_list('following_id', flat=True))
+                | set(HiddenSuggestion.objects.filter(user=user).values_list('hidden_id', flat=True)))
+    mutual = {}
+    if friends:
+        sample = list(friends)[:500]
+        for friend, their in connections(sample).items():
+            for cand in their - excluded:
+                mutual.setdefault(cand, set()).add(friend)
+    followers = set(Follow.objects.filter(following=user, accepted=True).values_list('follower_id', flat=True)) - excluded
+    ranked = sorted(set(mutual) | followers, key=lambda u: (-(len(mutual.get(u, ())) + (1.5 if u in followers else 0)), -u))[:limit]
+    users = {u.pk: u for u in User.objects.filter(pk__in=ranked, is_active=True)}
+    names = {u.pk: u.name for u in User.objects.filter(pk__in={f for u in ranked for f in list(mutual.get(u, ()))[:2]})}
+    results = []
+    for uid in ranked:
+        u = users.get(uid)
+        if u is None:
+            continue
+        common = mutual.get(uid, set())
+        if common:
+            first = [names[f] for f in list(common)[:2] if f in names]
+            n = len(common)
+            reason = f'{n} ami{"s" if n > 1 else ""} en commun' + (' : ' + ' et '.join(first) if n <= 2 and first else '')
+        else:
+            reason = 'Vous suit'
+        results.append(dict(user_brief(u, user), mutual_count=len(common), reason=reason))
+    if len(results) < limit:
+        # Compléter avec les nouveaux membres (retrouver ses proches qui viennent d'arriver).
+        taken = excluded | set(ranked)
+        for u in (User.objects.filter(is_active=True).exclude(pk__in=taken).order_by('-date_joined')[:limit - len(results)]):
+            results.append(dict(user_brief(u, user), mutual_count=0, reason='Nouveau sur Kozons'))
+    return results
+
+
 @api(['GET'])
 def suggestions(request):
-    """Suggestions : amis d'amis puis comptes populaires."""
-    mine = Follow.objects.filter(follower=request.user).values('following_id')
-    excluded = set(Follow.objects.filter(follower=request.user).values_list('following_id', flat=True)) | blocked_ids(request.user) | {request.user.pk}
-    fof = (User.objects.filter(followers_set__follower_id__in=mine, followers_set__accepted=True)
-           .exclude(pk__in=excluded).annotate(n=Count('pk')).order_by('-n')[:15])
-    users = list(fof)
-    if len(users) < 15:
-        popular = (User.objects.exclude(pk__in=excluded | {u.pk for u in users}).filter(is_active=True)
-                   .annotate(n=Count('followers_set')).order_by('-n', '-date_joined')[:15 - len(users)])
-        users += list(popular)
-    return {'results': [user_brief(u, request.user) for u in users]}
+    limit = min(50, max(1, as_int(request.GET.get('limit'), 20)))
+    return {'results': suggestion_list(request.user, limit)}
+
+
+@api(['POST'])
+def hide_suggestion(request, user_id):
+    from .models import HiddenSuggestion
+    other = get_object_or_404(User, pk=user_id)
+    HiddenSuggestion.objects.get_or_create(user=request.user, hidden=other)
+    return {'ok': True}
 
 
 # ---------------------------------------------------------------- Publications
@@ -497,7 +569,17 @@ def stories(request):
     if request.method == 'POST':
         return create_story(request)
     groups = {}
-    for s in visible_stories(request.user).order_by('created_at'):
+    stories_ = list(visible_stories(request.user).order_by('created_at'))
+    # Mes stories : la liste des vues est jointe, l'œil l'affiche aussitôt (une seule requête).
+    mine = [s.pk for s in stories_ if s.user_id == request.user.pk]
+    if mine:
+        by_story = {}
+        for v in StoryView.objects.filter(story_id__in=mine).select_related('user').order_by('-viewed_at'):
+            by_story.setdefault(v.story_id, []).append(v)
+        for s in stories_:
+            if s.user_id == request.user.pk:
+                s.viewer_list = viewer_rows(by_story.get(s.pk, []), request.user)
+    for s in stories_:
         g = groups.setdefault(s.user_id, {'user': user_brief(s.user, request.user), 'stories': []})
         g['stories'].append(story_data(s, request.user))
     result = []
@@ -573,8 +655,7 @@ def story_action(request, pk):
 @api(['GET'])
 def story_viewers(request, pk):
     story = get_object_or_404(Story, pk=pk, user=request.user)
-    views = story.views.select_related('user').order_by('-viewed_at')
-    return {'results': [dict(user_brief(v.user, request.user), liked=v.liked, viewed_at=v.viewed_at.isoformat()) for v in views]}
+    return {'results': viewer_rows(story.views.select_related('user').order_by('-viewed_at'), request.user)}
 
 
 # ---------------------------------------------------------------- Notifications

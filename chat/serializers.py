@@ -65,6 +65,7 @@ def message_data(msg, viewer=None, starred_ids=None, opened_ids=None):
         'file_name': '' if msg.deleted else msg.file_name,
         'file_size': msg.file_size,
         'duration': msg.duration,
+        'waveform': msg.waveform,
         'reply_to': None if msg.deleted else reply_preview(msg.reply_to),
         'forwarded': msg.forwarded,
         'view_once': msg.view_once,

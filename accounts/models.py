@@ -26,6 +26,10 @@ class User(AbstractUser):
     avatar_visibility = models.CharField(max_length=10, choices=VISIBILITY, default='everyone')
     read_receipts = models.BooleanField(default=True)
 
+    # Invitations : lien personnel kozonstic.com/invite/<code> ; qui m'a fait venir sur Kozons.
+    invite_code = models.CharField(max_length=12, unique=True, null=True, blank=True)
+    invited_by = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='invitees')
+
     @property
     def name(self):
         return self.display_name or self.username

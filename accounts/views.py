@@ -70,12 +70,73 @@ def register(request):
     except ValidationError as e:
         raise ApiError(' '.join(e.messages))
     user.set_password(password)
+    inviter = find_inviter(data.get('invite'))
+    user.invited_by = inviter
     try:
         user.save()
     except IntegrityError:
         raise ApiError("Ce nom d'utilisateur est déjà pris.")
+    if inviter:
+        welcome_invitee(inviter, user)
     open_session(request, user, remember=True)
     return {'user': user_private(user)}
+
+
+# ---------------------------------------------------------------- invitations
+
+INVITE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'  # sans caractères ambigus (l, 1, o, 0)
+
+
+def invite_code_for(user):
+    if not user.invite_code:
+        while True:
+            code = ''.join(secrets.choice(INVITE_ALPHABET) for _ in range(8))
+            if not User.objects.filter(invite_code=code).exists():
+                break
+        User.objects.filter(pk=user.pk, invite_code__isnull=True).update(invite_code=code)
+        user.refresh_from_db(fields=['invite_code'])
+    return user.invite_code
+
+
+def invite_url(request, user):
+    base = (getattr(settings, 'PUBLIC_BASE_URL', '') or request.build_absolute_uri('/')).rstrip('/')
+    return f'{base}/invite/{invite_code_for(user)}'
+
+
+def find_inviter(code):
+    code = (code or '').strip().lower()
+    if not code or len(code) > 12:
+        return None
+    return User.objects.filter(invite_code=code, is_active=True).first()
+
+
+def welcome_invitee(inviter, user):
+    """Inscription par lien d'invitation : les deux deviennent amis (abonnés l'un à l'autre)
+    et celui qui a invité est prévenu."""
+    from social.models import Follow
+    from social.views import notify
+    Follow.objects.get_or_create(follower=user, following=inviter, defaults={'accepted': True})
+    Follow.objects.get_or_create(follower=inviter, following=user, defaults={'accepted': True})
+    notify(inviter, user, 'invite_joined')
+
+
+@api(['GET'])
+def my_invite(request):
+    """Mon lien d'invitation et les personnes qui ont rejoint Kozons grâce à moi."""
+    joined = User.objects.filter(invited_by=request.user).order_by('-date_joined')
+    return {'url': invite_url(request, request.user), 'code': request.user.invite_code,
+            'joined': joined.count(), 'recent': [user_brief(u, request.user) for u in joined[:10]]}
+
+
+@api(['GET'], auth=False)
+def invite_lookup(request, code):
+    """Page d'inscription ouverte par un lien d'invitation : qui invite ?"""
+    rate_limit(request, 'invite-lookup', 60, 300)
+    inviter = find_inviter(code)
+    if inviter is None:
+        raise ApiError('Invitation introuvable.', 404)
+    return {'inviter': {'name': inviter.name, 'username': inviter.username,
+                        'avatar': inviter.avatar.url if inviter.avatar and inviter.avatar_visibility == 'everyone' else None}}
 
 
 @api(['POST'], auth=False)

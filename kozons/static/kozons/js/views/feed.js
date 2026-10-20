@@ -4,13 +4,15 @@ import { state } from '../store.js';
 import { h, clear, icon, btn, avatar, ago, compact, richText, menu, modal, toast, errorToast, confirmDialog, promptDialog, pickFiles, onVisible, spinner, empty } from '../ui.js';
 import { storiesBar } from './stories.js';
 import { chooseConversations } from './dialogs.js';
+import { suggestionCarousel } from './people.js';
 
 export function render(stage) {
   const posts = h('div.feed-posts');
   const sentinel = h('div.sentinel');
   const bar = storiesBar();
   const side = h('aside.feed-side');
-  const page = h('div.feed-page', h('div.feed-main', bar, posts, sentinel), side);
+  // « Vous connaissez peut-être » (amis de vos amis), comme Facebook.
+  const page = h('div.feed-page', h('div.feed-main', bar, suggestionCarousel(), posts, sentinel), side);
   stage.appendChild(page);
 
   let before = null, hasMore = true, loading = false;
@@ -46,7 +48,7 @@ async function renderSuggestions(side) {
       results.length ? h('div.list-title', 'Suggestions pour vous') : null,
       results.slice(0, 8).map(u => h('div.row.suggestion',
         h('button.row.grow', { type: 'button', onclick: () => window.kozons.go('/u/' + u.username) }, avatar(u.avatar, u.name, 36),
-          h('div.grow', h('div.strong', u.username), h('div.muted.small', u.name))),
+          h('div.grow', h('div.strong', u.name), h('div.muted.small', u.reason || '@' + u.username))),
         followButton(u.id, null, 'link'))),
       h('p.muted.small.footer-note', '© 2026 Kozons'));
   } catch (e) { /* facultatif */ }

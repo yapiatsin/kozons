@@ -141,6 +141,8 @@ function build(page) {
     }, 'Changer le mot de passe')));
 
   const other = h('div.settings-card',
+    h('button.info-row', { type: 'button', onclick: () => window.kozons.go('/people') }, icon('users'),
+      h('div.grow', h('div', 'Inviter des amis'), h('div.muted.small', 'Partager mon lien, retrouver des contacts'))),
     h('button.info-row', { type: 'button', onclick: () => window.kozons.go('/starred') }, icon('star'), h('span.grow', 'Messages importants')),
     h('button.info-row', { type: 'button', onclick: () => window.kozons.go('/u/' + me.username) }, icon('user'), h('span.grow', 'Voir mon profil public')),
     h('button.info-row.danger', { type: 'button', onclick: () => window.kozons.logout() }, icon('logout'), h('span.grow', 'Se déconnecter')));

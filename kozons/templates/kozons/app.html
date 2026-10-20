@@ -4,7 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#0099cc">
-  <title>Kozons</title>
+  <title>{{ og.title }}</title>
+  <meta name="description" content="{{ og.description }}">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Kozons">
+  <meta property="og:title" content="{{ og.title }}">
+  <meta property="og:description" content="{{ og.description }}">
+  <meta property="og:image" content="{{ og.image }}">
+  <meta property="og:url" content="{{ og.url }}">
+  <meta name="twitter:card" content="summary">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="{% static 'kozons/icon.svg' %}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ css_url }}">

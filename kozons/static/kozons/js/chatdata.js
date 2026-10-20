@@ -106,7 +106,7 @@ export async function sendMessage(convId, fields, { file, onProgress } = {}) {
   const temp = {
     id: clientId, client_id: clientId, conversation_id: convId, sender_id: state.me.id, sender: state.me,
     kind: fields.kind || 'text', text: fields.text || '', file: file ? URL.createObjectURL(file) : (fields.preview_url || null),
-    file_name: file ? file.name : '', file_size: file ? file.size : 0, duration: fields.duration || 0,
+    file_name: file ? file.name : '', file_size: file ? file.size : 0, duration: fields.duration || 0, waveform: fields.waveform || '',
     reply_to: fields.reply_preview || null, created_at: new Date().toISOString(), reactions: [],
     pending: true, progress: 0, view_once: !!fields.view_once, mentions: fields.mention_preview || [],
     latitude: fields.latitude, longitude: fields.longitude,

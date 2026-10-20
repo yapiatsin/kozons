@@ -258,6 +258,15 @@ def send_message(request, part):
         kind = detected
         fields.update(file=upload, file_name=upload.name[:255], file_size=upload.size,
                       duration=float(data.get('duration') or 0), view_once=as_bool(data.get('view_once')) and kind in ('image', 'video', 'voice'))
+        if kind == 'voice':
+            # Lisible sur tous les téléphones (AAC), forme d'onde et durée exactes.
+            from .audio import clean_waveform, convert_voice
+            fields['waveform'] = clean_waveform(data.get('waveform'))
+            converted = convert_voice(upload)
+            if converted:
+                content, waveform, secs = converted
+                fields.update(file=content, file_name=content.name, file_size=content.size,
+                              waveform=waveform or fields['waveform'], duration=secs or fields['duration'])
     elif kind == 'location':
         try:
             fields['latitude'] = float(data.get('latitude'))
@@ -411,7 +420,7 @@ def forward(request, pk):
         part = svc.get_participant(request.user, cid)
         svc.can_send(part)
         svc.create_message(part.conversation, request.user, kind=msg.kind, text=msg.text, file=msg.file.name if msg.file else '',
-                           file_name=msg.file_name, file_size=msg.file_size, duration=msg.duration,
+                           file_name=msg.file_name, file_size=msg.file_size, duration=msg.duration, waveform=msg.waveform,
                            latitude=msg.latitude, longitude=msg.longitude, shared_post=msg.shared_post,
                            contact_user=msg.contact_user, sticker=msg.sticker, forwarded=True)
     return {'ok': True, 'count': len(targets)}

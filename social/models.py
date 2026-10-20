@@ -113,8 +113,18 @@ class StoryView(models.Model):
         constraints = [models.UniqueConstraint(fields=['story', 'user'], name='uniq_story_view')]
 
 
+class HiddenSuggestion(models.Model):
+    """Suggestion d'ami écartée (« ✕ ») : elle ne revient plus."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    hidden = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user', 'hidden'], name='uniq_hidden_suggestion')]
+
+
 class Notification(models.Model):
-    VERBS = [(v, v) for v in ('like', 'comment', 'reply', 'follow', 'follow_request', 'follow_accept', 'mention', 'comment_like', 'story_like')]
+    VERBS = [(v, v) for v in ('like', 'comment', 'reply', 'follow', 'follow_request', 'follow_accept', 'mention', 'comment_like', 'story_like', 'invite_joined')]
 
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
     actor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')

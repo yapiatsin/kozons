@@ -101,6 +101,10 @@ class SocialTests(TestCase):
         self.assertTrue(self.cb.get('/api/stories').json()['results'][0]['all_seen'])
         viewers = self.ca.get(f'/api/stories/{sid}/viewers').json()['results']
         self.assertEqual([v['id'] for v in viewers], [self.bob.pk])
+        # Mes stories arrivent avec la liste des vues (l'œil l'affiche sans attendre) ; pas celles des autres.
+        mine = self.ca.get('/api/stories').json()['results'][0]['stories'][0]
+        self.assertEqual(([v['id'] for v in mine['viewers']], mine['view_count']), ([self.bob.pk], 1))
+        self.assertNotIn('viewers', self.cb.get('/api/stories').json()['results'][0]['stories'][0])
         # Amis proches uniquement : invisible pour les autres abonnés.
         self.ca.post('/api/stories', {'text': 'secret', 'close_friends_only': '1'})
         self.assertEqual(len(self.cb.get('/api/stories').json()['results'][0]['stories']), 1)
@@ -108,3 +112,63 @@ class SocialTests(TestCase):
         self.assertEqual(len(self.cb.get('/api/stories').json()['results'][0]['stories']), 2)
         Story.objects.update(expires_at='2000-01-01T00:00:00Z')
         self.assertEqual(self.cb.get('/api/stories').json()['results'], [])
+
+
+class FriendSuggestionTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        from social.models import Follow
+        self.Follow = Follow
+        self.me, self.c = make_user('moi', display_name='Moi')
+        self.awa, _ = make_user('awa', display_name='Awa')
+        self.koffi, _ = make_user('koffi', display_name='Koffi')
+        self.yao, _ = make_user('yao', display_name='Yao')        # ami d'Awa et de Koffi
+        self.ama, _ = make_user('ama', display_name='Ama')        # amie d'Awa seulement
+        self.fan, _ = make_user('fan', display_name='Fan')        # me suit, je ne le suis pas
+        for a, b in [(self.me, self.awa), (self.koffi, self.me), (self.me, self.koffi), (self.awa, self.yao), (self.yao, self.koffi), (self.ama, self.awa), (self.fan, self.me)]:
+            Follow.objects.create(follower=a, following=b)
+
+    def test_friends_of_friends_ranked_by_mutual_friends(self):
+        res = self.c.get('/api/suggestions').json()['results']
+        names = [u['username'] for u in res]
+        self.assertEqual(names[:3], ['yao', 'fan', 'ama'])               # 2 amis en commun > me suit > 1 ami
+        self.assertNotIn('awa', names)                                    # déjà mon amie
+        self.assertNotIn('moi', names)
+        self.assertEqual(res[0]['mutual_count'], 2)
+        self.assertIn('2 amis en commun', res[0]['reason'])
+        self.assertEqual(res[1]['reason'], 'Vous suit')
+        self.assertEqual(res[2]['reason'], '1 ami en commun : Awa')
+        # « ✕ » : la suggestion ne revient plus.
+        jpost(self.c, f'suggestions/{self.yao.pk}/hide')
+        self.assertNotIn('yao', [u['username'] for u in self.c.get('/api/suggestions').json()['results']])
+
+
+class InviteTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.awa, self.ca = make_user('awa', display_name='Awa Koné')
+
+    def test_invite_link_signup_makes_friends(self):
+        from social.models import Follow
+        info = self.ca.get('/api/invite').json()
+        code = info['url'].rsplit('/', 1)[1]
+        self.assertEqual((len(code), info['joined']), (8, 0))
+        self.assertEqual(self.ca.get('/api/invite').json()['url'], info['url'])     # lien stable
+        self.assertEqual(Client().get(f'/api/invite/{code}').json()['inviter']['name'], 'Awa Koné')
+        self.assertEqual(Client().get('/api/invite/inconnu').status_code, 404)
+        # Aperçu du lien partagé (WhatsApp, Facebook…).
+        self.assertContains(Client().get(f'/invite/{code}'), 'Awa Koné vous invite sur Kozons')
+        c = Client()
+        r = jpost(c, 'auth/register', {'username': 'koffi', 'email': 'koffi@example.com', 'password': 'Motdepasse1!', 'invite': code})
+        self.assertEqual(r.status_code, 200, r.content)
+        koffi = User.objects.get(username='koffi')
+        self.assertEqual(koffi.invited_by, self.awa)
+        self.assertTrue(Follow.objects.filter(follower=koffi, following=self.awa, accepted=True).exists())
+        self.assertTrue(Follow.objects.filter(follower=self.awa, following=koffi, accepted=True).exists())
+        self.assertTrue(Notification.objects.filter(recipient=self.awa, actor=koffi, verb='invite_joined').exists())
+        self.assertEqual(self.ca.get('/api/invite').json()['joined'], 1)
+        # Code invalide : l'inscription marche quand même, sans parrain.
+        r = jpost(Client(), 'auth/register', {'username': 'yao', 'email': 'yao@example.com', 'password': 'Motdepasse1!', 'invite': 'xxxx'})
+        self.assertEqual((r.status_code, User.objects.get(username='yao').invited_by), (200, None))

@@ -102,6 +102,7 @@ class Message(models.Model):
     file_name = models.CharField(max_length=255, blank=True)
     file_size = models.BigIntegerField(default=0)
     duration = models.FloatField(default=0)
+    waveform = models.CharField(max_length=64, blank=True)  # vocal : 48 niveaux (0-31) codés en lettres
     reply_to = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='+')
     forwarded = models.BooleanField(default=False)
     view_once = models.BooleanField(default=False)

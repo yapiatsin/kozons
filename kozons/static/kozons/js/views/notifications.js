@@ -14,6 +14,7 @@ const VERBS = {
   mention: 'vous a mentionné(e).',
   comment_like: 'a aimé votre commentaire :',
   story_like: 'a aimé votre story.',
+  invite_joined: 'a rejoint Kozons grâce à votre invitation. Vous êtes maintenant amis !',
 };
 
 export function render(stage) {

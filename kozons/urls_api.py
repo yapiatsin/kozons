@@ -12,6 +12,8 @@ from social import views as social
 urlpatterns = [
     # Comptes
     path('auth/register', accounts.register),
+    path('invite', accounts.my_invite),
+    path('invite/<str:code>', accounts.invite_lookup),
     path('auth/login', accounts.login_view),
     path('auth/logout', accounts.logout_view),
     path('auth/password', accounts.change_password),
@@ -33,6 +35,7 @@ urlpatterns = [
     path('users/<int:user_id>/close-friend', social.toggle_close_friend),
     path('follow-requests', social.follow_requests),
     path('suggestions', social.suggestions),
+    path('suggestions/<int:user_id>/hide', social.hide_suggestion),
     path('profiles/<str:username>', social.profile),
     path('profiles/<str:username>/posts', social.profile_posts),
     path('profiles/<str:username>/<str:which>', social.follow_list),
