@@ -1,7 +1,7 @@
 // Rendu d'une bulle de message et de ses variantes.
 import { api } from '../api.js';
 import { state } from '../store.js';
-import { h, icon, avatar, richText, isEmojiOnly, timeHM, bytes, duration, lightbox, errorToast, toast } from '../ui.js';
+import { h, icon, avatar, richText, isEmojiOnly, timeHM, bytes, duration, lightbox, errorToast, toast, onLongPress } from '../ui.js';
 
 const NAME_COLORS = ['#e542a3', '#1f7aec', '#d3a100', '#0099cc', '#7f66ff', '#fc5c65', '#35cd96', '#ff8a00'];
 
@@ -76,9 +76,69 @@ export function renderMessage(msg, ctx) {
     h('div.bubble-wrap', bubble, reactions));
   if (typeof msg.id === 'number') {
     row.addEventListener('contextmenu', e => { e.preventDefault(); ctx.onMenu(msg, null, e); });
+    if (ctx.onSelect && msg.kind !== 'system') {
+      // Téléphone : appui long = sélection (barre d'actions + réactions), comme WhatsApp.
+      onLongPress(row, () => ctx.onSelect(msg));
+      row.addEventListener('click', e => {
+        if (!ctx.isSelecting || !ctx.isSelecting()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        ctx.onSelect(msg);
+      }, true);
+    }
     row.addEventListener('dblclick', e => { if (!e.target.closest('a,button,video,audio,input')) ctx.onReply && ctx.onReply(msg); });
+    if (ctx.onReply && !msg.deleted) swipeToReply(row, () => ctx.onReply(msg), () => !!(ctx.isSelecting && ctx.isSelecting()));
   }
   return row;
+}
+
+/** Téléphone : glisser un message de la gauche vers la droite pour y répondre (comme WhatsApp Android).
+    La bulle suit le doigt, l'icône « répondre » apparaît à gauche ; au-delà du seuil, petite vibration
+    et, au lâcher, la réponse est préparée. Un geste plutôt vertical laisse défiler la discussion. */
+const SWIPE_MAX = 90, SWIPE_TRIGGER = 58;
+function swipeToReply(row, onReply, disabled) {
+  const wrap = row.querySelector('.bubble-wrap');
+  let hint = null, sx = 0, sy = 0, dx = 0, mode = null, armed = false;
+  const reset = () => {
+    wrap.style.transition = 'transform .2s ease-out';
+    wrap.style.transform = '';
+    if (hint) { hint.style.transition = 'opacity .2s'; hint.style.opacity = '0'; }
+    mode = null; armed = false; dx = 0;
+  };
+  row.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1 || disabled()) { mode = 'off'; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; mode = null; armed = false;
+  }, { passive: true });
+  row.addEventListener('touchmove', e => {
+    if (mode === 'off' || e.touches.length !== 1) return;
+    const x = e.touches[0].clientX - sx, y = e.touches[0].clientY - sy;
+    if (!mode) {
+      if (Math.abs(x) < 10 && Math.abs(y) < 10) return;
+      // Glissement nettement horizontal vers la droite : on prend la main ; sinon on laisse défiler.
+      mode = x > 0 && Math.abs(x) > Math.abs(y) * 1.4 ? 'swipe' : 'off';
+      if (mode !== 'swipe') return;
+      if (!hint) { hint = h('span.swipe-reply', icon('reply', 20)); row.appendChild(hint); }
+      wrap.style.transition = hint.style.transition = 'none';
+      row.dispatchEvent(new Event('touchcancel'));  // annule l'appui long en cours
+    }
+    if (mode !== 'swipe') return;
+    e.preventDefault();
+    dx = Math.max(0, Math.min(SWIPE_MAX, x * 0.75));
+    wrap.style.transform = `translateX(${dx}px)`;
+    const p = Math.min(1, dx / SWIPE_TRIGGER);
+    hint.style.opacity = String(p);
+    hint.style.transform = `translateY(-50%) scale(${0.6 + 0.4 * p})`;
+    if (dx >= SWIPE_TRIGGER && !armed) { armed = true; if (navigator.vibrate) navigator.vibrate(12); }
+    else if (dx < SWIPE_TRIGGER) armed = false;
+  }, { passive: false });
+  const end = () => {
+    if (mode !== 'swipe') { mode = null; return; }
+    const fire = armed;
+    reset();
+    if (fire) onReply();
+  };
+  row.addEventListener('touchend', end);
+  row.addEventListener('touchcancel', e => { if (e.isTrusted) end(); });
 }
 
 function reactionChips(msg, ctx) {

@@ -20,6 +20,10 @@ const P = {
   attach: '<path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/>',
   smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01M15 9h.01" stroke-width="3"/>',
   keyboard: '<rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12.5h.01M10 12.5h.01M14 12.5h.01M18 12.5h.01" stroke-width="2.6"/><path d="M8 16h8"/>',
+  bag: '<path d="M5 8h14l-1.2 11.2a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>',
+  cart: '<circle cx="9" cy="20" r="1.4"/><circle cx="18" cy="20" r="1.4"/><path d="M2 3h3l2.6 12.2a1.5 1.5 0 0 0 1.5 1.2h8.6a1.5 1.5 0 0 0 1.5-1.1L21 7H6"/>',
+  truck: '<path d="M3 6h11v10H3zM14 9h4l3 3v4h-7"/><circle cx="7" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/>',
+  store: '<path d="M4 10v10h16V10M3 4h18l-1.5 5a2.5 2.5 0 0 1-4.8 0 2.6 2.6 0 0 1-5 0 2.5 2.5 0 0 1-4.9 0z"/><path d="M10 20v-5h4v5"/>',
   camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
   more: '<circle cx="12" cy="5" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="12" cy="19" r="1.3"/>',
   moreH: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
@@ -73,6 +77,15 @@ const P = {
   sticker: '<path d="M21 12V8a5 5 0 0 0-5-5H8a5 5 0 0 0-5 5v8a5 5 0 0 0 5 5h4z"/><path d="M12 21a9 9 0 0 0 9-9h-4a5 5 0 0 0-5 5z"/>',
   volume: '<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/>',
   volumeOff: '<path d="M11 5 6 9H2v6h4l5 4zM23 9l-6 6M17 9l6 6"/>',
+  // Catégories d'emoji (barre du bas, comme WhatsApp) et touche d'effacement.
+  paw: '<circle cx="6.5" cy="10.5" r="1.8"/><circle cx="10" cy="6" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="18.5" cy="10.5" r="1.8"/><path d="M8 18.2c0-2.9 2-5.7 4-5.7s4 2.8 4 5.7c0 1.6-1.4 2.3-2.8 1.8-.8-.3-1.6-.3-2.4 0C9.4 20.5 8 19.8 8 18.2z"/>',
+  coffee: '<path d="M4 9h12v4.5A5.5 5.5 0 0 1 10.5 19h-1A5.5 5.5 0 0 1 4 13.5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16"/><path d="M8 3.5v2.5M12 3.5v2.5M3 21h14"/>',
+  ball: '<circle cx="12" cy="12" r="9"/><path d="m12 7.5 3.8 2.8-1.5 4.4H9.7l-1.5-4.4z"/><path d="M12 3v4.5M15.8 10.3l4.6-1.6M14.3 14.7l2.9 3.9M9.7 14.7l-2.9 3.9M8.2 10.3 3.6 8.7"/>',
+  car: '<path d="M4 15.5V12l2-5.2A1.5 1.5 0 0 1 7.4 6h9.2a1.5 1.5 0 0 1 1.4.8L20 12v3.5"/><rect x="3" y="12" width="18" height="5" rx="1.5"/><path d="M5.5 17v2M18.5 17v2"/><circle cx="7.5" cy="14.5" r=".6"/><circle cx="16.5" cy="14.5" r=".6"/>',
+  bulb: '<path d="M9.5 18h5M10.5 21h3"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.5 1.1 1.3 1.1 2.1V16h5v-.1c0-.8.4-1.6 1.1-2.1A6 6 0 0 0 12 3z"/>',
+  symbols: '<path d="M4 4.5l6 6M10 4.5l-6 6"/><path d="M14 7.5h6M17 4.5v6"/><path d="M4 16h6M4 19.5h6"/><circle cx="17" cy="17.5" r="3"/>',
+  flag: '<path d="M5 21V3.5"/><path d="M5 4h12.5l-2.5 4.5 2.5 4.5H5"/>',
+  backspace: '<path d="M21 5H9l-6.5 7L9 19h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="m12 9 6 6M18 9l-6 6"/>',
 };
 
 export function icon(name, size = 22, cls = '') {

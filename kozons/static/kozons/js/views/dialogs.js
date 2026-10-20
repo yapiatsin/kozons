@@ -157,6 +157,16 @@ export function forwardDialog(msg) {
   });
 }
 
+/** Transfert de plusieurs messages (sélection), dans l'ordre de la discussion. */
+export function forwardMessages(msgs) {
+  const list = [...msgs].sort((a, b) => a.id - b.id);
+  if (list.length === 1) return forwardDialog(list[0]);
+  chooseConversations(`Transférer ${list.length} messages`, async ids => {
+    for (const m of list) await api.post(`messages/${m.id}/forward`, { conversation_ids: ids });
+    toast(`${list.length} messages transférés`);
+  });
+}
+
 export function contactDialog(onPick) {
   let m;
   const picker = userPicker({ onPick: u => { m.close(); onPick(u); } });

@@ -253,6 +253,11 @@ def add_notes_recipient(meeting, user_id):
         _add_recipients(notes, [user_id])
 
 
+def _ai_enabled():
+    from kozons import llm
+    return llm.enabled()
+
+
 def notes_state(meeting_id):
     notes_id = registry.notes(meeting_id)
     started = None
@@ -262,7 +267,7 @@ def notes_state(meeting_id):
         'meeting_id': meeting_id, 'active': bool(notes_id), 'notes_id': notes_id,
         'started_at': started.isoformat() if started else None,
         'transcribe': bool(notes_id) or registry.captions_wanted(meeting_id),
-        'ai_enabled': bool(settings.ANTHROPIC_API_KEY),
+        'ai_enabled': _ai_enabled(),
     }
 
 

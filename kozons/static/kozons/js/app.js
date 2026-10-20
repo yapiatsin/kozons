@@ -6,7 +6,7 @@ import { h, clear, icon, avatar, toast, menu } from './ui.js';
 import { installRealtime, loadConversations, notifyMessage } from './chatdata.js';
 import { renderAuth } from './views/auth.js';
 import { installCalls } from './views/calls.js';
-import { syncPush, enablePush, disablePush } from './push.js';
+import { syncPush, disablePush, askForPush } from './push.js';
 import { isActive, lastActiveAt, onActivityChange } from './activity.js';
 
 const ROUTES = [
@@ -24,6 +24,16 @@ const ROUTES = [
   [/^\/meet\/notes$/, () => import('./views/meet.js'), () => ({ notes: true })],
   [/^\/meet\/notes\/(\d+)$/, () => import('./views/meet.js'), m => ({ notes: true, id: +m[1] })],
   [/^\/meet\/([a-z0-9-]+)$/i, () => import('./views/meet.js'), m => ({ code: m[1].toLowerCase() })],
+  [/^\/shop$/, () => import('./views/shop.js'), () => ({ page: 'market' })],
+  [/^\/shop\/s\/([^/]+)$/, () => import('./views/shop.js'), m => ({ page: 'shop', slug: decodeURIComponent(m[1]) })],
+  [/^\/shop\/p\/(\d+)$/, () => import('./views/shop.js'), m => ({ page: 'product', id: +m[1] })],
+  [/^\/shop\/cart$/, () => import('./views/shop.js'), () => ({ page: 'cart' })],
+  [/^\/shop\/orders$/, () => import('./views/shop.js'), () => ({ page: 'orders' })],
+  [/^\/shop\/orders\/(\d+)$/, () => import('./views/shop.js'), m => ({ page: 'order', id: +m[1] })],
+  [/^\/shop\/manage(?:\/(\w+))?$/, () => import('./views/shop.js'), m => ({ page: 'manage', tab: m[1] })],
+  [/^\/shop\/subscribe$/, () => import('./views/shop.js'), () => ({ page: 'subscribe' })],
+  [/^\/brady$/, () => import('./views/brady.js'), () => ({})],
+  [/^\/brady\/(\d+)$/, () => import('./views/brady.js'), m => ({ id: +m[1] })],
   [/^\/notifications$/, () => import('./views/notifications.js'), () => ({})],
   [/^\/u\/([^/]+)$/, () => import('./views/profile.js'), m => ({ username: decodeURIComponent(m[1]) })],
   [/^\/p\/(\d+)$/, () => import('./views/post.js'), m => ({ id: +m[1] })],
@@ -31,17 +41,16 @@ const ROUTES = [
   [/^\/starred$/, () => import('./views/settings.js'), () => ({ starred: true })],
 ];
 
-const NAV = [
-  ['/', 'chat', 'Discussions', 'chats'],
-  ['/status', 'status', 'Statuts', 'status'],
-  ['/calls', 'phone', 'Appels', 'calls'],
-  ['/feed', 'home', 'Accueil', 'feed'],
-  ['/explore', 'explore', 'Explorer', 'explore'],
-  ['/reels', 'reels', 'Reels', 'reels'],
-  ['/live', 'live', 'LIVE', 'live'],
-  ['/meet', 'video', 'Meet', 'meet'],
-  ['/notifications', 'heart', 'Notifications', 'notifications'],
-];
+// Navigation regroupée (comme WhatsApp : peu d'onglets, avec libellés sur téléphone).
+//  - Discussions, Statuts et Appels : accès direct ;
+//  - « Actus » : le réseau social (fil, explorer, reels, LIVE) + « Créer » ;
+//  - « Services » : Meet, Boutique, Brady ;
+//  - « Moi » (téléphone) : profil, notifications, messages importants, paramètres.
+const SOCIAL_VIEWS = ['feed', 'explore', 'reels', 'live'];
+const SERVICE_VIEWS = ['meet', 'shop', 'brady'];
+const ME_VIEWS = ['profile', 'notifications', 'settings'];
+const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
+let currentView = '';
 
 let stage = null;
 let current = { module: null, cleanup: null };
@@ -113,6 +122,24 @@ async function start(me) {
     if (!notes || !['ready', 'no_ai', 'failed'].includes(notes.status) || location.pathname === '/meet/notes/' + notes.id) return;
     toast(`📝 Notes de réunion prêtes : ${notes.title}`, { timeout: 10000, action: { label: 'Ouvrir', run: () => go('/meet/notes/' + notes.id) } });
   });
+  // Barres de défilement : visibles seulement pendant le défilement (comme WhatsApp), voir app.css.
+  document.addEventListener('scroll', e => {
+    const el = e.target === document ? document.documentElement : e.target;
+    if (!el.classList) return;
+    el.classList.add('is-scrolling');
+    clearTimeout(el._scrollTimer);
+    el._scrollTimer = setTimeout(() => el.classList.remove('is-scrolling'), 900);
+  }, { capture: true, passive: true });
+  // Boutiques : nouvelle commande (vendeur) ou étape de suivi (client), hors des pages concernées.
+  bus.on('shop.order', ({ order }) => {
+    if (!order || location.pathname.startsWith('/shop/manage') || location.pathname === '/shop/orders/' + order.id) return;
+    const mine = order.role === 'buyer';
+    if (mine && order.status === 'pending') return;  // sa propre commande vient d'être envoyée
+    if (!mine && !['pending', 'cancelled', 'delivered'].includes(order.status)) return;
+    const text = mine ? `🛍️ ${order.shop.name} : ${order.status_label.toLowerCase()} (${order.code})`
+      : order.status === 'pending' ? `🛍️ Nouvelle commande de ${order.buyer.name} (${order.code})` : `${order.code} : ${order.status_label.toLowerCase()}`;
+    toast(text, { timeout: 9000, action: { label: 'Voir', run: () => go(mine ? '/shop/orders/' + order.id : '/shop/manage/orders') } });
+  });
   bus.on('notification', n => {
     state.notifications.unread++;
     updateBadges();
@@ -124,37 +151,80 @@ async function start(me) {
   try { await loadConversations(); } catch (e) { toast(e.message, { type: 'error' }); }
   api.get('notifications').then(r => { state.notifications.unread = r.unread; state.notifications.requests = r.requests; updateBadges(); }).catch(() => {});
   route();
-  if ('Notification' in window && Notification.permission === 'default') {
-    setTimeout(() => toast('Activez les notifications pour ne rater aucun message.', {
-      timeout: 10000, action: { label: 'Activer', run: () => enablePush().then(s => s === 'granted' && toast('Notifications activées sur cet appareil')) },
-    }), 2500);
-  }
+  // Invitation à activer les notifications (fenêtre « Activer vos notifications »).
+  setTimeout(askForPush, 1500);
+}
+
+function socialMenu() {
+  const v = currentView;
+  return [
+    { title: 'Actus' },
+    { label: 'Accueil (fil d’actualité)', icon: 'home', active: v === 'feed', action: () => go('/feed') },
+    { label: 'Explorer', icon: 'explore', active: v === 'explore', action: () => go('/explore') },
+    { label: 'Reels', icon: 'reels', active: v === 'reels', action: () => go('/reels') },
+    { label: 'LIVE', icon: 'live', active: v === 'live', action: () => go('/live') },
+    { title: 'Créer' },
+    { label: 'Publication', icon: 'image', action: () => import('./views/feed.js').then(m => m.createPostDialog()) },
+    { label: 'Reel', icon: 'plusSquare', action: () => import('./views/feed.js').then(m => m.createPostDialog({ reel: true })) },
+    { label: 'Story', icon: 'plus', action: () => import('./views/stories.js').then(m => m.createStoryDialog()) },
+    { label: 'Lancer un LIVE', icon: 'camera', action: () => go('/live/new') },
+  ];
+}
+
+function servicesMenu() {
+  const p = location.pathname;
+  return [
+    { title: 'Services' },
+    { label: 'Kozons Meet', icon: 'video', active: currentView === 'meet', action: () => go('/meet') },
+    { label: 'Boutique', icon: 'bag', active: p === '/shop' || p.startsWith('/shop/s/') || p.startsWith('/shop/p/'), action: () => go('/shop') },
+    { label: 'Ma boutique', icon: 'store', active: p.startsWith('/shop/manage') || p === '/shop/subscribe', action: () => go('/shop/manage') },
+    { label: 'Mes commandes', icon: 'truck', active: p.startsWith('/shop/orders'), action: () => go('/shop/orders') },
+    { label: 'Brady · Assistant IA', icon: 'bulb', active: currentView === 'brady', action: () => go('/brady') },
+  ];
+}
+
+function meMenu() {
+  const n = state.notifications.unread + state.notifications.requests;
+  return [
+    { label: 'Mon profil', icon: 'user', active: location.pathname === '/u/' + state.me.username, action: () => go('/u/' + state.me.username) },
+    { label: 'Notifications', icon: 'heart', badge: n, active: currentView === 'notifications', action: () => go('/notifications') },
+    { label: 'Messages importants', icon: 'star', action: () => go('/starred') },
+    { label: 'Paramètres', icon: 'settings', active: currentView === 'settings', action: () => go('/settings') },
+  ];
 }
 
 function shell() {
   navEls = {};
+  const link = (key, path, ic, label, extra = '') => (navEls[key] = h('a.rail-item' + extra, {
+    href: path, title: label, 'aria-label': label, onclick: e => { e.preventDefault(); go(path); },
+  }, icon(ic, 24), h('span.rail-label', label), h('span.badge.hidden')));
+  const group = (key, ic, label, items) => (navEls[key] = h('button.rail-item.rail-group', {
+    type: 'button', title: label, 'aria-label': label, 'aria-haspopup': 'menu',
+    onclick: e => menu(e.currentTarget, items(), { side: isPhone() ? undefined : 'right' }),
+  }, icon(ic, 24), h('span.rail-label', label), h('span.badge.hidden')));
+
   const rail = h('nav.rail', { 'aria-label': 'Navigation principale' },
     h('div.rail-logo', { title: 'Kozons', onclick: () => go('/') }, h('img', { src: '/static/kozons/icon.svg', alt: 'Kozons' })),
-    ...NAV.map(([path, ic, label, key]) => {
-      const el = h('a.rail-item', { href: path, title: label, 'aria-label': label, onclick: e => { e.preventDefault(); go(path); } },
-        icon(ic, 24), h('span.rail-label', label), h('span.badge.hidden'));
-      navEls[key] = el;
-      return el;
-    }),
+    link('chats', '/', 'chat', 'Discussions'),
+    link('status', '/status', 'status', 'Statuts'),
+    link('calls', '/calls', 'phone', 'Appels'),
+    group('social', 'explore', 'Actus', socialMenu),
+    group('services', 'grid', 'Services', servicesMenu),
+    // Brady, l'assistant IA des idées (comme Meta AI dans WhatsApp) : accès direct sur ordinateur.
+    h('div.rail-sep'),
+    (navEls.brady = h('a.rail-item.rail-brady', { href: '/brady', title: 'Brady · Assistant des idées', 'aria-label': 'Brady, assistant IA',
+      onclick: e => { e.preventDefault(); go('/brady'); } }, h('img', { src: '/static/kozons/brady-96.png', alt: '' }), h('span.rail-label', 'Brady'))),
     h('div.rail-spacer'),
-    (navEls.create = h('button.rail-item', {
-      title: 'Créer', 'aria-label': 'Créer',
-      onclick: e => menu(e.currentTarget, [
-        { label: 'Publication', icon: 'image', action: () => import('./views/feed.js').then(m => m.createPostDialog()) },
-        { label: 'Reel', icon: 'reels', action: () => import('./views/feed.js').then(m => m.createPostDialog({ reel: true })) },
-        { label: 'Story', icon: 'status', action: () => import('./views/stories.js').then(m => m.createStoryDialog()) },
-        { label: 'LIVE', icon: 'live', action: () => go('/live/new') },
-        { label: 'Réunion Meet', icon: 'video', action: () => go('/meet') },
-      ]),
-    }, icon('plusSquare', 24), h('span.rail-label', 'Créer'))),
-    (navEls.settings = h('a.rail-item', { href: '/settings', title: 'Paramètres', onclick: e => { e.preventDefault(); go('/settings'); } }, icon('settings', 24), h('span.rail-label', 'Paramètres'))),
-    (navEls.profile = h('a.rail-item.rail-me', { href: '/u/' + state.me.username, title: 'Profil', onclick: e => { e.preventDefault(); go('/u/' + state.me.username); } },
-      avatar(state.me.avatar, state.me.name, 28), h('span.rail-label', 'Profil'))),
+    link('notifications', '/notifications', 'heart', 'Notifications', '.rail-desk'),
+    link('settings', '/settings', 'settings', 'Paramètres', '.rail-desk'),
+    // Profil : direct sur ordinateur ; sur téléphone, menu « Moi » (profil, notifications, paramètres…).
+    (navEls.profile = h('a.rail-item.rail-me', { href: '/u/' + state.me.username, title: 'Profil', 'aria-label': 'Moi',
+      onclick: e => {
+        e.preventDefault();
+        if (isPhone()) menu(e.currentTarget, meMenu());
+        else go('/u/' + state.me.username);
+      } },
+      avatar(state.me.avatar, state.me.name, 28), h('span.rail-label', 'Moi'), h('span.badge.hidden'))),
   );
   stage = h('main.stage');
   // Pas de bandeau « Connexion perdue » : la reconnexion se fait en arrière-plan, sans rien afficher.
@@ -176,7 +246,11 @@ function updateBadges() {
   for (const c of state.conversations.values()) if ((c.unread > 0 || c.me.marked_unread) && !c.me.archived) unreadChats++;
   setBadge('chats', unreadChats);
   setBadge('notifications', state.notifications.unread + state.notifications.requests);
+  setBadge('profile', state.notifications.unread + state.notifications.requests);  // « Moi » sur téléphone
   document.title = unreadChats ? `(${unreadChats}) Kozons` : 'Kozons';
+  // Pastille sur l'icône de l'application installée (écran d'accueil, barre des tâches).
+  const total = unreadChats + state.notifications.unread + state.notifications.requests;
+  if ('setAppBadge' in navigator) (total ? navigator.setAppBadge(total) : navigator.clearAppBadge()).catch(() => {});
 }
 bus.on('notifications:seen', () => { state.notifications.unread = 0; updateBadges(); });
 
@@ -204,10 +278,14 @@ async function route() {
   if (!found) return go('/', { replace: true });
   const [loader, params] = found;
   const module = await loader();
-  const key = Object.entries({ '/': 'chats', '/chats': 'chats', '/status': 'status', '/calls': 'calls', '/feed': 'feed', '/explore': 'explore', '/reels': 'reels', '/live': 'live', '/meet': 'meet', '/notifications': 'notifications', '/settings': 'settings', '/u/': 'profile' })
+  const key = Object.entries({ '/': 'chats', '/chats': 'chats', '/status': 'status', '/calls': 'calls', '/feed': 'feed', '/explore': 'explore', '/reels': 'reels', '/live': 'live', '/meet': 'meet', '/shop': 'shop', '/brady': 'brady', '/notifications': 'notifications', '/settings': 'settings', '/u/': 'profile' })
     .find(([p]) => p === '/' ? path === '/' : path.startsWith(p));
-  Object.entries(navEls).forEach(([k, el]) => el.classList.toggle('active', key && key[1] === k && (k !== 'profile' || path === '/u/' + state.me.username)));
-  document.body.dataset.view = key ? key[1] : '';
+  currentView = key ? key[1] : '';
+  const group = SOCIAL_VIEWS.includes(currentView) ? 'social' : SERVICE_VIEWS.includes(currentView) ? 'services' : null;
+  Object.entries(navEls).forEach(([k, el]) => el.classList.toggle('active',
+    k === group || (k === 'profile' && ME_VIEWS.includes(currentView) && (currentView !== 'profile' || path === '/u/' + state.me.username)) ||
+    (k === currentView && k !== 'profile')));
+  document.body.dataset.view = currentView;
 
   // Même vue (ex. passage d'une discussion à une autre) : mise à jour sans reconstruction.
   if (current.module === module && module.update) {

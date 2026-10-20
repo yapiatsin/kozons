@@ -44,17 +44,55 @@ def send_to_users(user_ids, payload, *, ttl=TTL_MESSAGE, urgency='normal', topic
         targets = [u for u in ids if not presence.is_connected(u)] if only_offline else ids
         now = timezone.now()
         stamp = int(now.timestamp() * 1000)
-        body = json.dumps({**payload, 'timestamp': stamp})
-        locked_body = json.dumps({**locked_payload(payload), 'timestamp': stamp})
+        # Pastille sur l'icône de l'application (comme WhatsApp) : nombre propre à chaque destinataire.
+        badges = badge_counts(targets) if payload.get('kind') != 'call' else {}
         # Appareil déconnecté pour inactivité : notification sans contenu (session expirée).
         idle_limit = now - timedelta(minutes=settings.IDLE_LOGOUT_MINUTES)
         subs = PushSubscription.objects.filter(user_id__in=targets).values_list(
-            'pk', 'endpoint', 'p256dh', 'auth', 'last_active_at')
-        for pk, endpoint, p256dh, auth, last_active in subs:
+            'pk', 'user_id', 'endpoint', 'p256dh', 'auth', 'last_active_at')
+        bodies = {}
+        for pk, user_id, endpoint, p256dh, auth, last_active in subs:
             locked = last_active is None or last_active < idle_limit
-            _executor.submit(_deliver, pk, endpoint, p256dh, auth, locked_body if locked else body, ttl, urgency, topic)
+            key = (user_id, locked)
+            if key not in bodies:
+                data = {**(locked_payload(payload) if locked else payload), 'timestamp': stamp}
+                if user_id in badges:
+                    data['badge'] = badges[user_id]
+                bodies[key] = json.dumps(data)
+            _executor.submit(_deliver, pk, endpoint, p256dh, auth, bodies[key], ttl, urgency, topic)
 
     transaction.on_commit(dispatch)
+
+
+def badge_counts(user_ids):
+    """Nombre affiché sur l'icône de l'application : discussions non lues (hors archivées)
+    + notifications non lues. {user_id: n}"""
+    from django.db.models import Count, F
+
+    ids = list(user_ids)
+    counts = dict.fromkeys(ids, 0)
+    try:
+        from chat.models import Message, Participant
+        now = timezone.now()
+        unread = (Message.objects
+                  .filter(conversation__participants__user_id__in=ids, conversation__participants__archived=False,
+                          id__gt=F('conversation__participants__last_read_id'))
+                  .exclude(sender_id=F('conversation__participants__user_id'))
+                  .exclude(kind='system').exclude(deleted=True).exclude(expires_at__lte=now)
+                  .values('conversation__participants__user_id')
+                  .annotate(n=Count('conversation_id', distinct=True)))
+        for row in unread:
+            counts[row['conversation__participants__user_id']] += row['n']
+        marked = (Participant.objects.filter(user_id__in=ids, marked_unread=True, archived=False)
+                  .values('user_id').annotate(n=Count('id')))
+        for row in marked:
+            counts[row['user_id']] += row['n']
+        from social.models import Notification
+        for row in Notification.objects.filter(recipient_id__in=ids, read=False).values('recipient_id').annotate(n=Count('id')):
+            counts[row['recipient_id']] += row['n']
+    except Exception:
+        logger.exception('Calcul de la pastille de notifications')
+    return counts
 
 
 GENERIC = {

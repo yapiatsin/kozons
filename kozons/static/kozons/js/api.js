@@ -61,6 +61,48 @@ export const api = {
   del: url => request('DELETE', url),
 };
 
+/** Réponse envoyée au fil de l'eau (une ligne JSON par événement) : onEvent est appelé pour chacune. */
+export async function streamPost(url, data, onEvent, { signal } = {}) {
+  let res;
+  try {
+    res = await fetch('/api/' + url, {
+      method: 'POST', credentials: 'same-origin', signal,
+      headers: { 'X-CSRFToken': csrfToken(), 'X-Kozons-Active': isActive() ? '1' : '0', 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    throw new ApiError('Connexion impossible. Vérifiez votre réseau.', 0);
+  }
+  if (!res.ok) {
+    let json = {};
+    try { json = await res.json(); } catch (e) { /* réponse vide */ }
+    if (res.status === 401) window.dispatchEvent(new Event('kozons:unauthorized'));
+    throw new ApiError(json.error || `Erreur ${res.status}`, res.status);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line) emit(line);
+    }
+  }
+  if (buffer.trim()) emit(buffer.trim());
+
+  function emit(line) {
+    let ev;
+    try { ev = JSON.parse(line); } catch (e) { return; } // ligne illisible ignorée
+    onEvent(ev); // une erreur levée ici (ex. événement « error ») remonte à l'appelant
+  }
+}
+
 export function form(obj) {
   const fd = new FormData();
   for (const [k, v] of Object.entries(obj)) {

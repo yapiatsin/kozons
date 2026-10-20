@@ -5,6 +5,7 @@ import { h, clear, icon, avatar, toast, errorToast, pickFiles, spinner, empty, l
 import { previewText } from '../chatdata.js';
 import { passwordInput, passwordChecklist, passwordIsValid } from './auth.js';
 import { pushSupport, enablePush } from '../push.js';
+import { themeDialog, THEMES, themeFor } from '../wallpapers.js';
 
 export function render(stage, params) {
   if (params.starred) return renderStarred(stage);
@@ -77,15 +78,13 @@ function build(page) {
 
   // --- Apparence
   const theme = prefs.get('theme', 'system');
-  const wallpaper = prefs.get('wallpaper', 'default');
   const appearance = h('div.settings-card',
     h('h3', 'Apparence'),
     h('label.info-row', icon('moon'), h('span.grow', 'Thème'),
       h('select.input.compact', { onchange: e => { prefs.set('theme', e.target.value); window.kozons.applyTheme(); } },
         [['system', 'Système'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, l]) => h('option', { value: v, selected: theme === v }, l)))),
-    h('label.info-row', icon('image'), h('span.grow', 'Fond des discussions'),
-      h('select.input.compact', { onchange: e => prefs.set('wallpaper', e.target.value) },
-        [['default', 'Motif Kozons'], ['none', 'Uni']].map(([v, l]) => h('option', { value: v, selected: wallpaper === v }, l)))));
+    h('button.info-row', { type: 'button', onclick: () => themeDialog(null) }, icon('image'), h('span.grow', 'Thème des discussions'),
+      h('span.muted', ((THEMES.find(t => t.key === themeFor(null).theme) || { label: 'Votre photo' }).label))));
 
   // --- Notifications
   const perm = pushSupport();

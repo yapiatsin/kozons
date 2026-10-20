@@ -51,6 +51,13 @@ export function render(stage, params) {
           } },
         ]))];
 
+    // Boutique du compte (un compte = une boutique) : accès direct depuis le profil.
+    api.get(`shop/user/${p.id}`).then(({ shop }) => {
+      if (!shop) return;
+      const actionsEl = page.querySelector('.profile-actions');
+      if (actionsEl) actionsEl.prepend(h('button.btn.primary.small', { onclick: () => window.kozons.go('/shop/s/' + shop.slug) }, icon('store', 16), ' Boutique'));
+    }).catch(() => {});
+
     // Zones indépendantes placées par une grille CSS : disposition « bureau » (avatar à gauche,
     // tout le reste à droite) ou « mobile » façon Instagram (chiffres à côté de l'avatar, boutons pleine largeur).
     const stat = (n, label, onclick) => h('button.stat', { type: 'button', onclick, disabled: !onclick }, h('strong', compact(n)), h('span', label));

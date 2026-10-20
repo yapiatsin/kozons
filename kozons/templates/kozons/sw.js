@@ -23,8 +23,18 @@ self.addEventListener('push', event => {
     actions: isCall ? [{ action: 'open', title: 'Répondre' }] : [],
   };
   // Le navigateur exige d'afficher une notification pour chaque push reçu.
-  event.waitUntil(self.registration.showNotification(data.title || 'Kozons', options));
+  event.waitUntil(Promise.all([
+    self.registration.showNotification(data.title || 'Kozons', options),
+    setBadge(data.badge),
+  ]));
 });
+
+// Pastille sur l'icône de l'application installée (nombre de discussions et notifications non lues).
+function setBadge(n) {
+  const nav = self.navigator;
+  if (typeof n !== 'number' || !nav || !('setAppBadge' in nav)) return Promise.resolve();
+  return (n > 0 ? nav.setAppBadge(n) : nav.clearAppBadge()).catch(() => {});
+}
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();

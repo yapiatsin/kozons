@@ -7,7 +7,9 @@ www.kozonstic.com {
 }
 
 kozonstic.com {
-	encode zstd gzip
+	# Réponses de Brady envoyées au fil de l'eau : jamais compressées (la compression les retiendrait).
+	@compressible not path /api/brady/chat
+	encode @compressible zstd gzip
 
 	# Vidéos et documents jusqu'à 100 Mo (KOZONS_MAX_UPLOAD) + marge multipart.
 	request_body {
@@ -38,6 +40,14 @@ kozonstic.com {
 		root * /srv/apps/kozons/media
 		file_server
 		header Cache-Control "public, max-age=86400"
+	}
+
+	# Brady (assistant IA) : chaque morceau de réponse est transmis immédiatement.
+	handle /api/brady/chat {
+		reverse_proxy kozons-web:8000 {
+			header_up X-Real-IP {remote_host}
+			flush_interval -1
+		}
 	}
 
 	# Application Django : HTTP + WebSocket (/ws/).

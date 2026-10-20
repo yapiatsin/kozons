@@ -56,13 +56,17 @@ function renderHome(stage) {
   const paintDays = () => {
     clear(days,
       btn('back', 'Jours précédents', () => shift(-7)),
-      Array.from({ length: 7 }, (_, i) => {
+      h('div.mt-days-track', Array.from({ length: 7 }, (_, i) => {
         const d = addDays(stripStart, i);
         const count = data.scheduled.filter(m => sameDay(new Date(m.scheduled_at), d)).length;
         return h('button.mt-day' + (sameDay(d, selected) ? '.active' : '') + (sameDay(d, new Date()) ? '.today' : ''), { type: 'button', onclick: () => { selected = d; paintDays(); paintList(); } },
           h('small', d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '').toUpperCase()), h('strong', String(d.getDate())), count ? h('span.mt-day-dot') : null);
-      }),
+      })),
       h('button.icon-btn', { type: 'button', title: 'Jours suivants', onclick: () => shift(7) }, h('span.mt-flip', icon('back'))));
+    // Jour choisi visible dans la bande (elle défile seule sur téléphone).
+    const track = days.querySelector('.mt-days-track');
+    const active = days.querySelector('.mt-day.active');
+    if (active) requestAnimationFrame(() => { track.scrollLeft = active.offsetLeft - track.offsetLeft - (track.clientWidth - active.offsetWidth) / 2; });
     dateLabel.textContent = selected.toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' });
   };
 

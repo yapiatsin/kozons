@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { bus, state } from '../store.js';
 import { send } from '../ws.js';
-import { h, clear, icon, btn, avatar, menu, toast, errorToast, ringtone, duration, listTime, empty, spinner, debounce } from '../ui.js';
+import { h, clear, icon, btn, avatar, menu, toast, errorToast, confirmDialog, ringtone, duration, listTime, empty, spinner, debounce, onLongPress } from '../ui.js';
 
 let current = null;
 let iceServers = null;
@@ -545,9 +545,37 @@ export function render(stage) {
   const list = h('div.call-list', spinner());
   const search = h('input.search-input', { type: 'search', placeholder: 'Rechercher un contact à appeler' });
   const results = h('div');
-  const page = h('div.page.narrow',
-    h('header.page-head', h('h2', 'Appels'),
-      h('button.btn.primary.small', { onclick: () => window.kozons.go('/meet') }, icon('video', 16), ' Réunions Meet')),
+  let calls = [];
+  let selected = null; // mode sélection (appui long) : ids des appels cochés
+
+  const removeCalls = async (payload, n) => {
+    const all = !!payload.all;
+    const ok = await confirmDialog(all ? "Effacer tout l'historique des appels ? Il sera effacé pour vous uniquement."
+      : `${n > 1 ? `Supprimer ces ${n} appels` : 'Supprimer cet appel'} de votre historique ? Votre correspondant le garde dans le sien.`,
+    { ok: all ? 'Tout effacer' : 'Supprimer', danger: true });
+    if (!ok) return;
+    try {
+      await api.post('calls/delete', payload);
+      toast(all ? 'Historique des appels effacé' : n > 1 ? `${n} appels supprimés` : 'Appel supprimé');
+      selected = null;
+      load();
+    } catch (e) { errorToast(e); }
+  };
+
+  const selCount = h('strong.sel-count');
+  const normalHead = h('header.page-head', h('h2', 'Appels'),
+    h('div.row.gap',
+      h('button.btn.primary.small', { onclick: () => window.kozons.go('/meet') }, icon('video', 16), ' Réunions Meet'),
+      btn('more', 'Plus', e => menu(e.currentTarget, [
+        { label: 'Sélectionner des appels', icon: 'check', action: () => { if (calls.length) { selected = new Set(); paint(); } } },
+        { label: "Effacer l'historique des appels", icon: 'trash', danger: true, action: () => calls.length && removeCalls({ all: true }) },
+      ]))));
+  const selHead = h('header.page-head.sel-head.hidden',
+    h('div.row.gap', btn('back', 'Annuler la sélection', () => { selected = null; paint(); }), selCount),
+    h('div.row.gap',
+      btn('checks', 'Tout sélectionner', () => { selected = new Set(calls.map(c => c.id)); paint(); }),
+      btn('trash', 'Supprimer', () => selected && selected.size && removeCalls({ ids: [...selected] }, selected.size))));
+  const page = h('div.page.narrow', normalHead, selHead,
     h('div.search-box', icon('search', 18), search),
     results,
     h('div.list-title', 'Récents'),
@@ -563,23 +591,49 @@ export function render(stage) {
     } catch (e) { errorToast(e); }
   }, 250));
 
+  const toggle = id => {
+    selected = selected || new Set();
+    if (selected.has(id)) selected.delete(id); else selected.add(id);
+    paint();
+  };
+
+  function paint() {
+    const selecting = !!selected;
+    normalHead.classList.toggle('hidden', selecting);
+    selHead.classList.toggle('hidden', !selecting);
+    selCount.textContent = selecting ? String(selected.size) : '';
+    list.classList.toggle('selecting', selecting);
+    if (!calls.length) return clear(list, empty('phone', 'Aucun appel', 'Vos appels audio et vidéo apparaîtront ici.'));
+    clear(list, calls.map(c => {
+      const other = c.caller.id === state.me.id ? c.callee : c.caller;
+      const row = callRow(other, c, {
+        selected: selecting && selected.has(c.id),
+        onSelect: selecting ? () => toggle(c.id) : null,
+        onMenu: (anchor, ev) => menu(anchor, [
+          { label: 'Sélectionner', icon: 'check', action: () => toggle(c.id) },
+          { label: "Supprimer de l'historique", icon: 'trash', danger: true, action: () => removeCalls({ ids: [c.id] }, 1) },
+        ], ev ? { x: ev.clientX, y: ev.clientY } : {}),
+      });
+      onLongPress(row, () => toggle(c.id));
+      return row;
+    }));
+  }
+
   const load = async () => {
     try {
-      const { results: calls } = await api.get('calls');
-      if (!calls.length) return clear(list, empty('phone', 'Aucun appel', 'Vos appels audio et vidéo apparaîtront ici.'));
-      clear(list, calls.map(c => {
-        const outgoing = c.caller.id === state.me.id;
-        const other = outgoing ? c.callee : c.caller;
-        return callRow(other, c);
-      }));
+      ({ results: calls } = await api.get('calls'));
+      if (selected) selected = new Set([...selected].filter(id => calls.some(c => c.id === id)));
+      paint();
     } catch (e) { clear(list, h('p.muted.pad', e.message)); }
   };
   load();
+  const onEsc = e => { if (e.key === 'Escape' && selected) { selected = null; paint(); } };
+  document.addEventListener('keydown', onEsc);
   const off = bus.on('calls:changed', load);
-  return off;
+  return () => { off(); document.removeEventListener('keydown', onEsc); };
 }
 
-function callRow(user, call) {
+function callRow(user, call, { selected = false, onSelect = null, onMenu = null } = {}) {
   let meta = null;
   if (call) {
     const outgoing = call.caller.id === state.me.id;
@@ -589,10 +643,13 @@ function callRow(user, call) {
       icon(outgoing ? 'arrowOut' : 'arrowIn', 16), icon(call.video ? 'video' : 'phone', 14),
       ` ${listTime(call.started_at)}${len ? ' · ' + len : ''}`);
   }
-  return h('div.call-row',
-    h('button.row.grow', { type: 'button', onclick: () => window.kozons.go('/u/' + user.username) },
-      avatar(user.avatar, user.name, 46),
+  return h('div.call-row' + (selected ? '.selected' : ''), {
+    oncontextmenu: onMenu ? e => { e.preventDefault(); if (onSelect) onSelect(); else onMenu(null, e); } : null,
+  },
+    h('button.row.grow', { type: 'button', onclick: () => onSelect ? onSelect() : window.kozons.go('/u/' + user.username) },
+      h('div.sel-avatar', avatar(user.avatar, user.name, 46), selected ? h('span.sel-check', icon('check', 14)) : null),
       h('div.grow', h('div.strong' + (call && call.caller.id !== state.me.id && call.status === 'missed' ? '.danger-text' : ''), user.name), meta || h('div.muted', '@' + user.username))),
-    btn('phone', 'Appel audio', () => startCall(user, false)),
-    btn('video', 'Appel vidéo', () => startCall(user, true)));
+    onSelect ? null : btn('phone', 'Appel audio', () => startCall(user, false)),
+    onSelect ? null : btn('video', 'Appel vidéo', () => startCall(user, true)),
+    onMenu && !onSelect ? btn('more', 'Options', e => onMenu(e.currentTarget)) : null);
 }

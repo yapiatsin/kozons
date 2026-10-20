@@ -118,12 +118,12 @@ class MeetAiTests(TestCase):
         self.assertIn('] Invité : je prépare la page de vente', doc)
         self.assertIn('<chat>', doc)
 
-    @override_settings(ANTHROPIC_API_KEY='')
+    @override_settings(ANTHROPIC_API_KEY='', AI_API_KEY='')
     def test_without_key_keeps_transcript(self):
         notes = ai.summarize(make_notes(self.host, self.guest).pk)
         self.assertEqual(notes.status, MeetingNotes.NO_AI)
 
-    @override_settings(ANTHROPIC_API_KEY='sk-test')
+    @override_settings(ANTHROPIC_API_KEY='sk-test', AI_API_KEY='')
     def test_summary_saved(self):
         result = {'title': 'Lancement v2', 'summary': 'La v2 sort vendredi.', 'key_points': [], 'decisions': ['Sortie vendredi'],
                   'action_items': [{'task': 'Page de vente', 'owner': 'Invité', 'due': ''}], 'chapters': [], 'open_questions': []}
@@ -140,7 +140,7 @@ class MeetAiTests(TestCase):
         stranger.force_login(User.objects.create_user('x', password='x'))
         self.assertEqual(stranger.get(f'/api/meet/notes/{notes.pk}').status_code, 404)
 
-    @override_settings(ANTHROPIC_API_KEY='sk-test')
+    @override_settings(ANTHROPIC_API_KEY='sk-test', AI_API_KEY='')
     def test_failure_is_reported(self):
         with mock.patch.object(ai, '_ask_claude', side_effect=RuntimeError('panne')):
             notes = ai.summarize(make_notes(self.host, self.guest).pk)
@@ -163,7 +163,7 @@ class MeetRealtimeTests(TransactionTestCase):
         self.assertTrue(ok)
         return comm
 
-    @override_settings(ANTHROPIC_API_KEY='')
+    @override_settings(ANTHROPIC_API_KEY='', AI_API_KEY='')
     async def test_full_meeting(self):
         registry.reset()
         host = await sync_to_async(User.objects.create_user)('host', password='x', display_name='Awa')

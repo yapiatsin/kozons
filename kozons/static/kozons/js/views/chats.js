@@ -1,28 +1,31 @@
 // Vue Discussions : liste à gauche, conversation ouverte à droite, panneau d'infos.
 import { api } from '../api.js';
-import { bus, state, sortedConversations, convTitle, convAvatar, peerOf, isMuted, prefs } from '../store.js';
+import { bus, state, sortedConversations, convTitle, convAvatar, peerOf, isMuted } from '../store.js';
 import { send } from '../ws.js';
 import {
   h, clear, icon, btn, avatar, menu, toast, errorToast, confirmDialog, listTime, dayLabel, lastSeenLabel,
-  debounce, autoGrow, pickFiles, emojiPicker, empty, spinner, QUICK_REACTIONS, duration, closeMenus,
+  debounce, autoGrow, pickFiles, emojiPicker, empty, spinner, QUICK_REACTIONS, duration, closeMenus, onLongPress, resizablePanel,
 } from '../ui.js';
 import {
   bucket, loadMessages, markRead, sendMessage, previewText, typingLabel, isConversationVisible, insertMessage,
 } from '../chatdata.js';
 import { renderMessage, signature, receiptStatus, ticks, replyQuote } from './message.js';
 import {
-  newChatDialog, newGroupDialog, forwardDialog, contactDialog, pollDialog, mediaPreviewDialog, reactionsDialog, messageInfoDialog,
+  newChatDialog, newGroupDialog, forwardDialog, forwardMessages, contactDialog, pollDialog, mediaPreviewDialog, reactionsDialog, messageInfoDialog,
 } from './dialogs.js';
 import { renderInfo } from './chatinfo.js';
 import { stickerPanel, stickerActionsDialog, loadStickers } from './stickerpanel.js';
 import { mentionInput } from './mentions.js';
 import { startCall } from './calls.js';
+import { applyWallpaper, themeDialog } from '../wallpapers.js';
 
 let root, listEl, paneEl, infoEl, searchInput;
 let filter = 'all';
 let showArchived = false;
 let pane = null; // état de la conversation ouverte
 let offs = [];
+let selected = null; // mode sélection (appui long) : ids des discussions cochées
+let sideHead = null, selHead = null, selCount = null;
 
 // Hauteur du clavier virtuel, mémorisée dans --kb-h : le panneau emoji prend exactement sa place.
 (function trackKeyboardHeight() {
@@ -50,8 +53,23 @@ export function render(stage, params) {
       onclick: e => { filter = k; chipsEl.querySelectorAll('button').forEach(b => b.classList.remove('active')); e.currentTarget.classList.add('active'); renderList(); },
     }, label)));
 
-  const sidebar = h('section.sidebar',
-    h('header.side-head',
+  selected = null;
+  selCount = h('strong.sel-count');
+  // Barre du mode sélection (comme WhatsApp) : nombre, supprimer, quitter.
+  selHead = h('header.side-head.sel-head.hidden',
+    btn('back', 'Annuler la sélection', () => setSelection(null)),
+    selCount,
+    h('div.row',
+      btn('trash', 'Supprimer les discussions', () => deleteChats([...selected])),
+      btn('more', 'Plus', e => menu(e.currentTarget, [
+        { label: 'Tout sélectionner', icon: 'checks', action: () => setSelection(new Set(visibleConvIds())) },
+        { label: 'Archiver', icon: 'archive', action: () => archiveSelected() },
+      ]))));
+  // Téléphone : bouton flottant pour parler à Brady (comme Meta AI dans WhatsApp).
+  const bradyFab = h('a.brady-fab', { href: '/brady', title: 'Brady · Assistant des idées', 'aria-label': 'Parler à Brady',
+    onclick: e => { e.preventDefault(); window.kozons.go('/brady'); } }, h('img', { src: '/static/kozons/brady-96.png', alt: '' }));
+  const sidebar = h('section.sidebar', selHead, bradyFab,
+    sideHead = h('header.side-head',
       h('h2', 'Discussions'),
       h('div.row',
         btn('edit', 'Nouvelle discussion', () => newChatDialog()),
@@ -70,11 +88,15 @@ export function render(stage, params) {
 
   paneEl = h('section.pane');
   infoEl = h('aside.info-drawer');
+  resizablePanel(sidebar, 'chats');
   root.append(sidebar, paneEl, infoEl);
   stage.appendChild(root);
 
   searchInput.addEventListener('input', debounce(renderList, 150));
+  const onEsc = e => { if (e.key === 'Escape' && selected) setSelection(null); };
+  document.addEventListener('keydown', onEsc);
   offs = [
+    () => document.removeEventListener('keydown', onEsc),
     bus.on('conversations:changed', debounce(renderList, 30)),
     bus.on('typing:changed', convId => { renderList(); if (pane && pane.convId === convId) updateHeader(); }),
     bus.on('presence:changed', () => { renderList(); if (pane) updateHeader(); }),
@@ -118,6 +140,51 @@ function matches(conv, q) {
   return convTitle(conv).toLowerCase().includes(q) || (peer && peer.username.toLowerCase().includes(q));
 }
 
+let lastVisible = [];
+const visibleConvIds = () => lastVisible;
+
+function setSelection(set) {
+  selected = set && set.size ? set : null;
+  if (selHead) {
+    selHead.classList.toggle('hidden', !selected);
+    sideHead.classList.toggle('hidden', !!selected);
+    if (selected) selCount.textContent = String(selected.size);
+  }
+  if (listEl) listEl.classList.toggle('selecting', !!selected);
+  renderList();
+}
+
+function toggleSelected(id) {
+  const set = new Set(selected || []);
+  if (set.has(id)) set.delete(id); else set.add(id);
+  setSelection(set);
+}
+
+async function deleteChats(ids) {
+  if (!ids.length) return;
+  const n = ids.length;
+  const ok = await confirmDialog(`${n > 1 ? `Supprimer ces ${n} discussions` : 'Supprimer cette discussion'} ? `
+    + 'Les messages seront effacés pour vous uniquement ; la discussion réapparaîtra si un nouveau message arrive.', { ok: 'Supprimer', danger: true });
+  if (!ok) return;
+  try {
+    await api.post('conversations/delete', { ids });
+    toast(n > 1 ? `${n} discussions supprimées` : 'Discussion supprimée');
+    setSelection(null);
+  } catch (e) { errorToast(e); }
+}
+
+async function archiveSelected() {
+  const ids = [...(selected || [])];
+  setSelection(null);
+  for (const id of ids) {
+    try {
+      const c = await api.post(`conversations/${id}/settings`, { archived: true });
+      state.conversations.set(c.id, c);
+    } catch (e) { errorToast(e); }
+  }
+  bus.emit('conversations:changed');
+}
+
 function renderList() {
   if (!listEl) return;
   const q = searchInput.value.trim().toLowerCase();
@@ -132,6 +199,13 @@ function renderList() {
     items.push(h('button.archived-row', { type: 'button', onclick: () => { showArchived = false; renderList(); } }, icon('back', 20), h('span', 'Discussions archivées')));
   } else if (archivedCount && !q) {
     items.push(h('button.archived-row', { type: 'button', onclick: () => { showArchived = true; renderList(); } }, icon('archive', 20), h('span', 'Archivées'), h('span.muted', String(archivedCount))));
+  }
+  lastVisible = convs.map(c => c.id);
+  if (selected) {
+    // Discussions disparues (supprimées ailleurs…) : on les retire de la sélection.
+    for (const id of [...selected]) if (!state.conversations.has(id)) selected.delete(id);
+    if (!selected.size) return setSelection(null);
+    selCount.textContent = String(selected.size);
   }
   items.push(...convs.map(chatItem));
   if (!convs.length && !q) {
@@ -179,12 +253,13 @@ function chatItem(conv) {
       previewText(last));
   } else preview = h('span.muted', conv.kind === 'group' ? 'Groupe créé' : 'Démarrez la discussion');
 
-  const item = h('a.chat-item' + (state.activeConversation === conv.id ? '.active' : '') + (unread ? '.unread' : ''), {
+  const isSel = !!(selected && selected.has(conv.id));
+  const item = h('a.chat-item' + (state.activeConversation === conv.id && !selected ? '.active' : '') + (unread ? '.unread' : '') + (isSel ? '.selected' : ''), {
     href: '/chats/' + conv.id,
-    onclick: e => { e.preventDefault(); window.kozons.go('/chats/' + conv.id); },
-    oncontextmenu: e => { e.preventDefault(); chatMenu(conv, null, e); },
+    onclick: e => { e.preventDefault(); if (selected) toggleSelected(conv.id); else window.kozons.go('/chats/' + conv.id); },
+    oncontextmenu: e => { e.preventDefault(); if (selected) toggleSelected(conv.id); else chatMenu(conv, null, e); },
   },
-  avatar(convAvatar(conv), title, 49, { group: conv.kind === 'group', online: peer && peer.online }),
+  h('div.sel-avatar', avatar(convAvatar(conv), title, 49, { group: conv.kind === 'group', online: peer && peer.online }), isSel ? h('span.sel-check', icon('check', 14)) : null),
   h('div.chat-main',
     h('div.chat-top', h('span.chat-name', title), h('span.chat-time' + (unread ? '.accent' : ''), last ? listTime(last.created_at) : '')),
     h('div.chat-bottom', h('div.chat-preview', preview),
@@ -196,6 +271,8 @@ function chatItem(conv) {
         conv.unread > 0 ? h('span.unread-badge' + (isMuted(conv) ? '.muted-badge' : ''), conv.unread > 999 ? '999+' : String(conv.unread))
           : conv.me.marked_unread ? h('span.unread-badge.dot') : null,
         h('button.item-menu', { type: 'button', 'aria-label': 'Options', onclick: e => { e.preventDefault(); e.stopPropagation(); chatMenu(conv, e.currentTarget); } }, icon('arrowDown', 18))))));
+  // Appui long : mode sélection (supprimer, archiver plusieurs discussions).
+  onLongPress(item, () => toggleSelected(conv.id));
   return item;
 }
 
@@ -209,7 +286,9 @@ function chatMenu(conv, anchor, ev) {
       ? { label: 'Marquer comme lu', icon: 'checks', action: () => { markRead(conv.id); setting({ marked_unread: false }); } }
       : { label: 'Marquer comme non lu', icon: 'chat', action: () => setting({ marked_unread: true }) },
     '-',
-    { label: 'Vider la discussion', icon: 'trash', danger: true, action: () => clearChat(conv) },
+    { label: 'Sélectionner', icon: 'check', action: () => toggleSelected(conv.id) },
+    { label: 'Vider la discussion', icon: 'trash', action: () => clearChat(conv) },
+    { label: 'Supprimer la discussion', icon: 'trash', danger: true, action: () => deleteChats([conv.id]) },
     conv.kind === 'group' ? { label: 'Quitter le groupe', icon: 'logout', danger: true, action: () => leaveGroup(conv) } : null,
   ], ev ? { x: ev.clientX, y: ev.clientY } : {});
 }
@@ -265,6 +344,7 @@ function closePane() {
   if (pane) {
     pane.cleanup.forEach(f => f());
     if (pane.recorder) pane.recorder.cancel();
+    document.querySelectorAll('.reaction-pill:not(.in-menu)').forEach(e => e.remove());
     sendTyping('stop');
   }
   pane = null;
@@ -288,16 +368,25 @@ async function openConversation(convId) {
   scroller.append(topLoader, listWrap);
   const downBtn = h('button.scroll-down.hidden', { type: 'button', 'aria-label': 'Aller en bas', onclick: () => scrollToBottom(true) }, icon('arrowDown', 22), h('span.badge.hidden'));
   const composer = h('footer.composer');
-  const wallpaper = prefs.get('wallpaper', 'default');
-  const paneBody = h('div.pane-body' + (wallpaper !== 'none' ? '.wallpaper' : ''), scroller, downBtn);
-  clear(paneEl, header, paneBody, composer);
+  const paneBody = h('div.pane-body', scroller, downBtn);
+  // Fond d'écran sous les messages ET sous la barre de saisie (qui flotte dessus, comme WhatsApp).
+  const paneMain = h('div.pane-main', paneBody, composer);
+  applyWallpaper(paneMain, convId);
+  clear(paneEl, header, paneMain);
 
   pane = {
     convId, conv, header, scroller, listWrap, topLoader, downBtn, composer, paneBody,
     nodes: new Map(), sigs: new Map(), replyTo: null, editing: null, cleanup: [], atBottom: true, loadingOlder: false, newWhileAway: 0,
+    msgSel: null, // messages sélectionnés (appui long)
   };
 
   scroller.addEventListener('scroll', onScroll, { passive: true });
+  scroller.addEventListener('scroll', () => placeReactionPill(), { passive: true });
+  // Thème changé (cette discussion ou thème général) : appliqué tout de suite.
+  pane.cleanup.push(bus.on('wallpaper:changed', () => { if (pane && pane.convId === convId) applyWallpaper(paneMain, convId); }));
+  const onSelEsc = e => { if (e.key === 'Escape' && pane && pane.msgSel) setMessageSelection(null); };
+  document.addEventListener('keydown', onSelEsc);
+  pane.cleanup.push(() => document.removeEventListener('keydown', onSelEsc));
   setupDrop(paneBody);
   updateHeader();
   buildComposer();
@@ -346,6 +435,8 @@ function subtitle(conv) {
 function updateHeader() {
   if (!pane) return;
   const conv = pane.conv = state.conversations.get(pane.convId) || pane.conv;
+  pane.header.classList.toggle('sel-head', !!pane.msgSel);
+  if (pane.msgSel) return clear(pane.header, ...selectionBar());
   const peer = peerOf(conv);
   clear(pane.header,
     btn('back', 'Retour', () => window.kozons.go('/'), 'back-btn'),
@@ -366,6 +457,7 @@ function updateHeader() {
           isMuted(conv) ? setting({ mute_hours: 0 }) : muteDialog(conv, setting);
         } },
         { label: 'Messages éphémères', icon: 'timer', action: () => disappearingDialog(conv) },
+        { label: 'Thème de la discussion', icon: 'image', action: () => themeDialog(conv.id) },
         { label: 'Fermer la discussion', icon: 'close', action: () => window.kozons.go('/') },
         '-',
         { label: 'Vider la discussion', icon: 'trash', danger: true, action: () => clearChat(conv) },
@@ -467,6 +559,7 @@ function renderMessages(ev = {}) {
       node = renderMessage(msg, {
         conv, showSender,
         onMenu: messageMenu, onJump: jumpTo, onReply: setReply,
+        onSelect: toggleMessage, isSelecting: () => !!(pane && pane.msgSel),
         onReactions: m => reactionsDialog(m, conv), onForward: m => forwardDialog(m),
       });
       if (showSender) node.classList.add('first');
@@ -484,6 +577,11 @@ function renderMessages(ev = {}) {
   if (marker && ev.initial === undefined && !ev.newMessage) {
     const firstUnread = b.items.find(m => typeof m.id === 'number' && m.id > pane.conv.me.last_read_id && m.sender_id !== state.me.id);
     if (firstUnread && pane.nodes.get(firstUnread.id)) pane.nodes.get(firstUnread.id).before(marker);
+  }
+  if (pane.msgSel) {
+    // Messages disparus (supprimés…) : retirés de la sélection.
+    for (const id of [...pane.msgSel]) if (!pane.nodes.has(id)) pane.msgSel.delete(id);
+    if (!pane.msgSel.size) setMessageSelection(null); else { paintMessageSelection(); updateHeader(); }
   }
 
   clear(pane.topLoader, b.hasMore ? spinner(22) : null);
@@ -562,8 +660,115 @@ async function jumpTo(messageId) {
   }
 }
 
+// ------------------------------------------------------------------ sélection de messages (appui long, comme WhatsApp)
+
+function selectedMessages() {
+  if (!pane || !pane.msgSel) return [];
+  return bucket(pane.convId).items.filter(m => pane.msgSel.has(m.id));
+}
+
+function toggleMessage(msg) {
+  if (!pane || typeof msg.id !== 'number' || msg.kind === 'system') return;
+  const set = new Set(pane.msgSel || []);
+  if (set.has(msg.id)) set.delete(msg.id); else set.add(msg.id);
+  setMessageSelection(set);
+}
+
+function setMessageSelection(set) {
+  if (!pane) return;
+  pane.msgSel = set && set.size ? set : null;
+  closeMenus();
+  paintMessageSelection();
+  updateHeader();
+}
+
+function paintMessageSelection() {
+  pane.nodes.forEach((node, id) => node.classList.toggle('msg-selected', !!(pane.msgSel && pane.msgSel.has(id))));
+  pane.paneBody.classList.toggle('selecting', !!pane.msgSel);
+  placeReactionPill(true);
+}
+
+/** Barre de réactions au-dessus du message sélectionné (un seul message). */
+function placeReactionPill(rebuild = false) {
+  let pill = document.querySelector('.reaction-pill:not(.in-menu)');
+  const msgs = selectedMessages();
+  const msg = msgs.length === 1 && !msgs[0].deleted ? msgs[0] : null;
+  const node = msg && pane && pane.nodes.get(msg.id);
+  if (!node) { if (pill) pill.remove(); return; }
+  if (rebuild || !pill || +pill.dataset.id !== msg.id) {
+    if (pill) pill.remove();
+    pill = reactionStrip(msg, () => setMessageSelection(null));
+    document.body.appendChild(pill);
+  }
+  // Au-dessus de la bulle, ou en dessous s'il n'y a pas la place ; masquée hors de la zone des messages.
+  const r = node.querySelector('.bubble').getBoundingClientRect();
+  const area = pane.scroller.getBoundingClientRect();
+  const ph = pill.offsetHeight, pw = pill.offsetWidth;
+  let top = r.top - ph - 8;
+  if (top < area.top + 4) top = r.bottom + 8;
+  pill.style.visibility = r.bottom > area.top && r.top < area.bottom ? 'visible' : 'hidden';
+  const left = msg.sender_id === state.me.id ? r.right - pw : r.left;
+  pill.style.top = Math.max(area.top + 4, Math.min(top, area.bottom - ph - 4)) + 'px';
+  pill.style.left = Math.max(8, Math.min(left, window.innerWidth - pw - 8)) + 'px';
+}
+
+function selectionBar() {
+  const msgs = selectedMessages();
+  const n = msgs.length;
+  const live = msgs.filter(m => !m.deleted);
+  const one = n === 1 ? msgs[0] : null;
+  const mine = !!one && one.sender_id === state.me.id;
+  const canForward = n > 0 && msgs.every(m => !m.deleted && !m.view_once && m.kind !== 'poll' && m.kind !== 'system');
+  const allStarred = live.length > 0 && live.every(m => m.starred);
+  const canEdit = mine && one.kind === 'text' && !one.deleted && Date.now() - new Date(one.created_at) < 15 * 60000;
+  const texts = live.filter(m => m.text).map(m => m.text);
+  const done = () => setMessageSelection(null);
+  const more = [
+    texts.length ? { label: 'Copier', icon: 'copy', action: () => { navigator.clipboard.writeText(texts.join('\n')).then(() => toast('Copié')); done(); } } : null,
+    canEdit ? { label: 'Modifier', icon: 'edit', action: () => { done(); setEditing(one); } } : null,
+    mine && !one.deleted ? { label: 'Infos', icon: 'info', action: () => { done(); messageInfoDialog(one); } } : null,
+    one && one.file && !one.deleted && !one.view_once ? { label: 'Télécharger', icon: 'download', action: () => {
+      const a = h('a', { href: one.file, download: one.file_name || '' }); document.body.appendChild(a); a.click(); a.remove(); done();
+    } } : null,
+    one && one.kind === 'sticker' && !one.deleted ? { label: 'Sticker : favoris et collection', icon: 'sticker', action: () => { done(); stickerActionsDialog(one); } } : null,
+  ].filter(Boolean);
+  return [
+    btn('back', 'Annuler la sélection', done),
+    h('strong.sel-count', String(n)),
+    h('div.row.sel-actions',
+      one && !one.deleted ? btn('reply', 'Répondre', () => { done(); setReply(one); }) : null,
+      live.length ? btn('star', allStarred ? 'Retirer des importants' : 'Marquer comme important', async () => {
+        done();
+        for (const m of live) if (!!m.starred === allStarred) await api.post(`messages/${m.id}/star`).catch(errorToast);
+        toast(allStarred ? 'Retiré des importants' : 'Marqué comme important');
+      }) : null,
+      btn('trash', 'Supprimer', () => deleteMessages(msgs)),
+      canForward ? btn('forward', 'Transférer', () => { done(); forwardMessages(msgs); }) : null,
+      more.length ? btn('more', 'Plus', e => menu(e.currentTarget, more)) : null),
+  ];
+}
+
+async function deleteMessages(msgs) {
+  if (!pane || !msgs.length) return;
+  const conv = pane.conv;
+  const canAll = msgs.every(m => !m.deleted && ((m.sender_id === state.me.id && Date.now() - new Date(m.created_at) < 2 * 86400000)
+    || (conv.kind === 'group' && conv.me.role === 'admin')));
+  const n = msgs.length;
+  const choice = await confirmDialog(n > 1 ? `Supprimer ces ${n} messages ?` : 'Supprimer ce message ?', {
+    ok: 'Supprimer pour moi', danger: true,
+    extra: canAll ? { label: 'Supprimer pour tous', value: 'everyone' } : null,
+  });
+  if (!choice) return;
+  setMessageSelection(null);
+  for (const m of msgs) {
+    try { await api.post(`messages/${m.id}/delete`, { scope: choice === 'everyone' ? 'everyone' : 'me' }); } catch (e) { errorToast(e); }
+  }
+}
+
 function messageMenu(msg, anchor, ev) {
   if (!pane) return;
+  // Téléphone : même comportement que l'appui long (barre d'actions + réactions), comme WhatsApp.
+  if (window.innerWidth <= 760) { toggleMessage(msg); return; }
   const conv = pane.conv;
   const mine = msg.sender_id === state.me.id;
   const me = conv.me;
@@ -579,27 +784,42 @@ function messageMenu(msg, anchor, ev) {
     mine && !msg.deleted ? { label: 'Infos', icon: 'info', action: () => messageInfoDialog(msg) } : null,
     msg.file && !msg.deleted && !msg.view_once ? { label: 'Télécharger', icon: 'download', action: () => { const a = h('a', { href: msg.file, download: msg.file_name || '' }); document.body.appendChild(a); a.click(); a.remove(); } } : null,
     '-',
+    { label: 'Sélectionner', icon: 'check', action: () => toggleMessage(msg) },
+    '-',
     { label: 'Supprimer', icon: 'trash', danger: true, action: () => deleteMessage(msg, canDeleteAll) },
   ], ev ? { x: ev.clientX, y: ev.clientY } : {});
-  // Barre de réactions rapides en tête du menu.
-  if (!msg.deleted) {
-    const list = layer.querySelector('.menu');
-    const bar = h('div.quick-reactions', QUICK_REACTIONS.map(e => h('button', {
-      type: 'button',
-      onclick: () => { closeMenus(); api.post(`messages/${msg.id}/react`, { emoji: e }).catch(errorToast); },
-    }, e)), h('button', { type: 'button', title: "Plus d'emojis", onclick: () => {
-      closeMenus();
-      const picker = emojiPicker(e => { api.post(`messages/${msg.id}/react`, { emoji: e }).catch(errorToast); closeMenus(); });
-      const l = h('div.menu-layer', { onmousedown: ev2 => { if (ev2.target === l) closeMenus(); } }, h('div.menu.emoji-menu', picker));
-      document.getElementById('overlay-root').appendChild(l);
-      const m = l.firstChild;
-      m.style.left = Math.max(8, Math.min(window.innerWidth - 340, (ev ? ev.clientX : (anchor || pane.paneBody).getBoundingClientRect().left) - 150)) + 'px';
-      m.style.top = Math.max(8, Math.min(window.innerHeight - 330, (ev ? ev.clientY : (anchor || pane.paneBody).getBoundingClientRect().top))) + 'px';
-    } }, '+'));
-    list.prepend(bar);
-    const r = list.getBoundingClientRect();
-    if (r.bottom > window.innerHeight - 8) list.style.top = Math.max(8, window.innerHeight - r.height - 8) + 'px';
+  if (msg.deleted) return;
+  // Réactions : bulle séparée posée au-dessus du menu, comme WhatsApp Web.
+  const list = layer.querySelector('.menu');
+  const pill = reactionStrip(msg, () => closeMenus());
+  pill.classList.add('in-menu');
+  layer.appendChild(pill);
+  const gap = 8;
+  let r = list.getBoundingClientRect();
+  const ph = pill.offsetHeight, pw = pill.offsetWidth;
+  if (r.top - ph - gap < 8) {
+    // Pas la place au-dessus : on descend le menu sous la bulle.
+    list.style.top = Math.min(window.innerHeight - r.height - 8, 8 + ph + gap) + 'px';
+    r = list.getBoundingClientRect();
   }
+  pill.style.top = Math.max(8, r.top - ph - gap) + 'px';
+  pill.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8)) + 'px';
+}
+
+/** Rangée de réactions rapides (👍 ❤️ 😂 😮 😢 🙏 +), commune au menu ordinateur et à la sélection mobile. */
+function reactionStrip(msg, after) {
+  const react = e => { api.post(`messages/${msg.id}/react`, { emoji: e }).catch(errorToast); after(); };
+  return h('div.reaction-pill', { dataset: { id: msg.id } },
+    QUICK_REACTIONS.map(e => h('button', { type: 'button', title: e, onclick: () => react(e) }, e)),
+    h('button.more', { type: 'button', 'aria-label': "Plus d'emojis", title: "Plus d'emojis", onclick: () => {
+      after();
+      const picker = emojiPicker(e => { closeMenus(); react(e); });
+      const l = h('div.menu-layer', { onmousedown: ev => { if (ev.target === l) closeMenus(); } }, h('div.menu.emoji-menu', picker));
+      document.getElementById('overlay-root').appendChild(l);
+      const box = l.firstChild;
+      box.style.left = Math.max(8, (window.innerWidth - box.offsetWidth) / 2) + 'px';
+      box.style.top = Math.max(8, (window.innerHeight - box.offsetHeight) / 2) + 'px';
+    } }, icon('plus', 20)));
 }
 
 async function deleteMessage(msg, canDeleteAll) {
@@ -638,7 +858,8 @@ function updateComposerState() {
 
 function buildComposer() {
   const { composer } = pane;
-  const input = h('textarea.composer-input', { rows: 1, placeholder: 'Écrire un message', 'aria-label': 'Message' });
+  const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
+  const input = h('textarea.composer-input', { rows: 1, placeholder: isPhone() ? 'Message' : 'Entrez un message', 'aria-label': 'Message' });
   const baseResize = autoGrow(input, 140);
   // Mentions « @membre » (groupes uniquement).
   const mention = mentionInput(input, {
@@ -648,30 +869,60 @@ function buildComposer() {
   const resize = () => { baseResize(); mention.refresh(); };
   // Téléphone : le panneau emoji prend la place du clavier (comme WhatsApp), on ne redonne donc
   // pas le focus au champ après un emoji, sinon le clavier réapparaîtrait.
-  const isPhone = () => window.matchMedia('(max-width: 760px)').matches;
   const emojiTab = emojiPicker(e => {
     const s = input.selectionStart ?? input.value.length;
     input.value = input.value.slice(0, s) + e + input.value.slice(input.selectionEnd ?? s);
     input.selectionStart = input.selectionEnd = s + e.length;
     if (!isPhone()) input.focus();
     resize(); toggleSend();
-  });
-  // Panneau emoji / stickers (barre d'onglets en bas, comme WhatsApp). Stickers chargés à la demande.
+  }, { searchOpen: false });
+  // Panneau emoji / stickers comme WhatsApp : en haut, loupe · [emoji | stickers] · touche effacer ;
+  // les catégories d'emoji sont en bas. Stickers chargés à la demande.
   let stickersTab = null;
   const pickerBody = h('div.picker-body', emojiTab);
-  const pickerTabs = h('div.picker-switch');
+  const pickerSeg = h('div.picker-seg');
+  const searchBtn = btn('search', 'Rechercher un emoji', () => emojiTab.toggleSearch(), 'picker-search');
   const showPicker = which => {
     if (which === 'stickers' && !stickersTab) {
       stickersTab = stickerPanel({ onSend: sticker => { sendSticker(sticker); closePicker(); } });
       pane.cleanup.push(() => stickersTab.cleanup());
     }
+    if (which === 'stickers') emojiTab.toggleSearch(false);
     pickerBody.replaceChildren(which === 'stickers' ? stickersTab : emojiTab);
-    pickerTabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.tab === which));
+    pickerSeg.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.tab === which));
+    searchBtn.classList.toggle('invisible', which === 'stickers');
   };
-  pickerTabs.append(
-    h('button.active', { type: 'button', dataset: { tab: 'emoji' }, title: 'Emoji', onclick: () => showPicker('emoji') }, icon('smile', 20)),
-    h('button', { type: 'button', dataset: { tab: 'stickers' }, title: 'Stickers', onclick: () => showPicker('stickers') }, icon('sticker', 20)));
-  const emojiPanel = h('div.emoji-panel.hidden', h('div.picker', pickerBody, pickerTabs));
+  pickerSeg.append(
+    h('button.active', { type: 'button', dataset: { tab: 'emoji' }, title: 'Emoji', 'aria-label': 'Emoji', onclick: () => showPicker('emoji') }, icon('smile', 22)),
+    h('button', { type: 'button', dataset: { tab: 'stickers' }, title: 'Stickers', 'aria-label': 'Stickers', onclick: () => showPicker('stickers') }, icon('sticker', 22)));
+  // Touche « effacer » : supprime le caractère (ou l'emoji entier) avant le curseur ; maintenue, elle répète.
+  const graphemes = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter('fr', { granularity: 'grapheme' }) : null;
+  const deleteBackward = () => {
+    const start = input.selectionStart ?? input.value.length, end = input.selectionEnd ?? start;
+    let from = start;
+    if (start === end) {
+      if (!start) return;
+      const before = input.value.slice(0, start);
+      const last = graphemes ? [...graphemes.segment(before)].pop().segment : Array.from(before).pop();
+      from = start - last.length;
+    }
+    input.value = input.value.slice(0, from) + input.value.slice(end);
+    input.selectionStart = input.selectionEnd = from;
+    resize(); toggleSend();
+  };
+  const delBtn = btn('backspace', 'Effacer', null, 'picker-del');
+  let repeat = null;
+  const stopRepeat = () => { clearTimeout(repeat); clearInterval(repeat); repeat = null; };
+  delBtn.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    deleteBackward();
+    stopRepeat();
+    repeat = setTimeout(() => { repeat = setInterval(deleteBackward, 70); }, 420);
+  });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => delBtn.addEventListener(ev, stopRepeat));
+  pane.cleanup.push(stopRepeat);
+  const pickerHead = h('div.picker-head', h('span.picker-grip'), h('div.picker-bar', searchBtn, pickerSeg, delBtn));
+  const emojiPanel = h('div.emoji-panel.hidden', h('div.picker', pickerHead, pickerBody));
   const topBar = h('div.composer-top');
   const sendBtn = h('button.send-btn', { type: 'button', 'aria-label': 'Envoyer' }, icon('mic', 22));
   pane.input = input;
@@ -681,6 +932,7 @@ function buildComposer() {
     const hasText = input.value.trim().length > 0;
     sendBtn.replaceChildren(icon(hasText || pane.editing ? 'send' : 'mic', 22));
     sendBtn.setAttribute('aria-label', hasText ? 'Envoyer' : 'Enregistrer un message vocal');
+    composer.classList.toggle('has-text', hasText);  // téléphone : l'appareil photo s'efface pendant la saisie
   };
   pane.toggleSend = toggleSend;
 
@@ -738,6 +990,8 @@ function buildComposer() {
   // Ouvrir le panneau : sur téléphone, on ferme le clavier et le panneau prend sa place,
   // le bouton devient « clavier ». Le refermer depuis ce bouton rouvre le clavier.
   const setPicker = open => {
+    if (open) emojiTab.refreshRecent();
+    else emojiTab.toggleSearch(false);
     emojiPanel.classList.toggle('hidden', !open);
     composer.classList.toggle('picker-open', open);
     const kb = open && isPhone();
@@ -781,8 +1035,20 @@ function buildComposer() {
     pane.cleanup.push(() => pane.removePickerListeners && pane.removePickerListeners());
   }
 
+  const camBtn = btn('camera', 'Appareil photo', async () => {
+    const f = await pickFiles({ accept: 'image/*,video/*', capture: 'environment' });
+    if (f.length) mediaPreviewDialog(f, sendFile);
+  });
+  camBtn.classList.add('composer-cam');
+  attach.classList.add('composer-attach');
+  emojiBtn.classList.add('composer-emoji');
+  // Barre façon WhatsApp : une « pilule » (réponse citée au-dessus du champ) + bouton rond micro / envoyer.
+  // Téléphone : emoji · champ · trombone · appareil photo, bouton rond à côté.
+  // Ordinateur : trombone · emoji · champ, micro / envoyer dans la même barre (ordre réglé en CSS).
+  const pill = h('div.composer-pill', topBar,
+    h('div.composer-line', emojiBtn, h('div.composer-field', mention.field), attach, camBtn));
   // Le panneau est placé après la barre de saisie : sur téléphone il occupe la place du clavier.
-  clear(composer, mention.picker, topBar, h('div.composer-row', emojiBtn, attach, h('div.composer-field', mention.field), sendBtn), emojiPanel);
+  clear(composer, mention.picker, h('div.composer-row', pill, sendBtn), emojiPanel);
   updateComposerState();
 }
 

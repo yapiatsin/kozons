@@ -30,6 +30,8 @@ INSTALLED_APPS = [
     'social',
     'live',
     'meet',
+    'brady',
+    'shop',
     'kozons',
 ]
 
@@ -160,10 +162,24 @@ IDLE_LOGOUT_MINUTES = config('IDLE_LOGOUT_MINUTES', default=45, cast=int)
 LIVE_MEDIA_URL = config('LIVE_MEDIA_URL', default='').rstrip('/')
 LIVE_P2P_MAX_VIEWERS = config('LIVE_P2P_MAX_VIEWERS', default=20, cast=int)
 
-# Kozons Meet : notes et résumés de réunion rédigés par Claude (API Anthropic).
-# Sans clé, la prise de notes fournit la transcription seule.
+# Intelligence artificielle (Brady, notes de réunion Meet) — modèle GRATUIT par défaut :
+# GPT-OSS 120B servi par Groq (clé gratuite sur console.groq.com, sans carte bancaire), via une API
+# « compatible OpenAI ». Autre fournisseur gratuit : changer AI_API_BASE et AI_MODEL, par exemple
+#   Gemini     : https://generativelanguage.googleapis.com/v1beta/openai  + gemini-2.5-flash
+#   OpenRouter : https://openrouter.ai/api/v1                              + un modèle « :free »
+# Sans aucune clé : Brady est indisponible et les notes Meet contiennent la transcription seule.
+AI_API_KEY = config('AI_API_KEY', default='')  # la clé se met dans .env, jamais ici
+AI_API_BASE = config('AI_API_BASE', default='https://api.groq.com/openai/v1').rstrip('/')
+AI_MODEL = config('AI_MODEL', default='openai/gpt-oss-120b')
+AI_REASONING_EFFORT = config('AI_REASONING_EFFORT', default='low')  # low | medium | high (modèles GPT-OSS)
+# Texte envoyé en une fois au modèle (le quota gratuit limite les jetons par minute) :
+# au-delà, les comptes rendus de réunion sont rédigés morceau par morceau.
+AI_MAX_INPUT_CHARS = config('AI_MAX_INPUT_CHARS', default=12000, cast=int)
+
+# Optionnel (payant) : Claude, utilisé seulement si AI_API_KEY est vide.
 ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
 MEET_AI_MODEL = config('MEET_AI_MODEL', default='claude-opus-5-5')
+BRADY_AI_MODEL = config('BRADY_AI_MODEL', default='claude-opus-5-5')
 
 # Notifications push (Web Push) : envoyées aux utilisateurs sans application ouverte.
 VAPID_PUBLIC_KEY = config('VAPID_PUBLIC_KEY', default='')
@@ -171,6 +187,18 @@ VAPID_PRIVATE_KEY = config('VAPID_PRIVATE_KEY', default='')
 VAPID_SUBJECT = config('VAPID_SUBJECT', default='mailto:admin@localhost')
 
 KOZONS_EMAIL_ASYNC = True
+
+# Abonnement des boutiques : paiement en ligne GeniusPay (Wave, Orange Money, MTN, Moov, carte).
+# Les clés se mettent dans .env, jamais ici. Webhook à déclarer chez GeniusPay :
+#   <PUBLIC_BASE_URL>/api/shop/geniuspay/webhook
+PUBLIC_BASE_URL = config('PUBLIC_BASE_URL', default='').strip().rstrip('/')  # ex. https://kozons.com
+GENIUSPAY_API_KEY = config('GENIUSPAY_API_KEY', default='').strip()
+GENIUSPAY_API_SECRET = config('GENIUSPAY_API_SECRET', default='').strip()
+GENIUSPAY_BASE_URL = config('GENIUSPAY_BASE_URL', default='https://pay.genius.ci/api/v1/merchant').strip().rstrip('/')
+GENIUSPAY_WEBHOOK_SECRET = config('GENIUSPAY_WEBHOOK_SECRET', default='').strip()
+GENIUSPAY_MIN_AMOUNT = 200
+# Prix de l'abonnement de base (FCFA par mois).
+SHOP_MONTHLY_PRICE = config('SHOP_MONTHLY_PRICE', default=250, cast=int)
 
 # Journalisation : tout sur la console (erreurs d'envoi d'e-mail, diagnostics).
 LOGGING = {
@@ -181,5 +209,6 @@ LOGGING = {
     'root': {'handlers': ['console'], 'level': config('LOG_LEVEL', default='INFO')},
     'loggers': {
         'django.server': {'level': 'WARNING'},  # pas une ligne par requête HTTP
+        'httpx': {'level': 'WARNING'},          # appels au service d'IA : seulement les problèmes
     },
 }

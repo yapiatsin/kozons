@@ -76,6 +76,8 @@ class Participant(models.Model):
     archived = models.BooleanField(default=False)
     muted_until = models.DateTimeField(null=True, blank=True)
     cleared_before_id = models.BigIntegerField(default=0)
+    # Discussion supprimée de sa liste (comme WhatsApp) : elle réapparaît au prochain message.
+    hidden = models.BooleanField(default=False)
     marked_unread = models.BooleanField(default=False)
 
     class Meta:
@@ -179,3 +181,6 @@ class Call(models.Model):
     started_at = models.DateTimeField(default=timezone.now)
     answered_at = models.DateTimeField(null=True, blank=True)
     ended_at = models.DateTimeField(null=True, blank=True)
+    # Historique effacé par l'appelant / l'appelé (chacun pour soi uniquement).
+    hidden_for_caller = models.BooleanField(default=False)
+    hidden_for_callee = models.BooleanField(default=False)

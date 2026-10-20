@@ -37,6 +37,7 @@ def start_direct(request):
     if other == request.user:
         raise ApiError('Choisissez un autre utilisateur.')
     conv = svc.get_or_create_direct(request.user, other)
+    Participant.objects.filter(conversation=conv, user=request.user, hidden=True).update(hidden=False)
     return svc.conversation_for(request.user, conv.pk)
 
 
@@ -505,9 +506,44 @@ def media_gallery(request, pk):
 
 @api(['GET'])
 def call_history(request):
-    calls = (Call.objects.filter(Q(caller=request.user) | Q(callee=request.user))
+    calls = (Call.objects.filter(Q(caller=request.user, hidden_for_caller=False) | Q(callee=request.user, hidden_for_callee=False))
              .select_related('caller', 'callee').order_by('-started_at')[:100])
     return {'results': [call_data(c, request.user) for c in calls]}
+
+
+@api(['POST'])
+def delete_calls(request):
+    """Efface des appels de son historique (ids) ou tout l'historique (all) — pour soi uniquement."""
+    data = body(request)
+    mine = Call.objects.exclude(status__in=('ringing', 'ongoing'))
+    if not as_bool(data.get('all')):
+        ids = [i for i in (as_int(x) for x in data.get('ids') or []) if i]
+        if not ids:
+            raise ApiError('Aucun appel sélectionné.')
+        mine = mine.filter(pk__in=ids)
+    n = mine.filter(caller=request.user).update(hidden_for_caller=True)
+    n += mine.filter(callee=request.user).update(hidden_for_callee=True)
+    return {'deleted': n}
+
+
+@api(['POST'])
+def delete_conversations(request):
+    """Supprime des discussions de sa liste (comme WhatsApp) : messages effacés pour soi,
+    discussion masquée jusqu'au prochain message. Les autres membres ne voient aucun changement."""
+    data = body(request)
+    ids = [i for i in (as_int(x) for x in data.get('ids') or []) if i]
+    if not ids:
+        raise ApiError('Aucune discussion sélectionnée.')
+    parts = list(Participant.objects.filter(user=request.user, conversation_id__in=ids))
+    for part in parts:
+        latest = Message.objects.filter(conversation_id=part.conversation_id).order_by('-id').values_list('id', flat=True).first() or 0
+        part.cleared_before_id = latest
+        part.last_read_id = max(part.last_read_id, latest)
+        part.hidden = True
+        part.pinned = part.archived = part.marked_unread = False
+        part.save(update_fields=['cleared_before_id', 'last_read_id', 'hidden', 'pinned', 'archived', 'marked_unread'])
+        push([request.user.pk], 'conversation.removed', {'conversation_id': part.conversation_id})
+    return {'deleted': len(parts)}
 
 
 TURN_CREDENTIAL_TTL = 24 * 3600

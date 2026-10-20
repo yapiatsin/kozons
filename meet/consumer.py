@@ -413,7 +413,7 @@ class MeetConsumerMixin:
         if not notes_id:
             raise ValueError("Activez la prise de notes pour obtenir un résumé de ce qui a été dit.")
         if not ai.enabled():
-            raise ValueError("L'IA n'est pas configurée sur ce serveur (clé ANTHROPIC_API_KEY).")
+            raise ValueError("L'IA n'est pas configurée sur ce serveur (clé AI_API_KEY).")
         if self._meet_throttle(('catchup', meeting.pk), 30):
             raise ValueError('Résumé déjà demandé, patientez quelques secondes.')
         ai.catchup_async(notes_id, self.channel_name, meeting.pk)

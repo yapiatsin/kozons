@@ -314,3 +314,41 @@ class CallResilienceTests(TransactionTestCase):
         self.assertEqual(await self.status(ghost.pk), 'ended')
         await wa.disconnect()
         await wb.disconnect()
+
+
+@override_settings(MEDIA_ROOT=MEDIA)
+class DeleteHistoryTests(TransactionTestCase):
+    """Supprimer des discussions et des appels de son historique, pour soi uniquement (comme WhatsApp)."""
+
+    def test_delete_conversation_for_me_only_and_comes_back(self):
+        from chat import services
+        alice, ca = make_user('alice')
+        bob, cb = make_user('bob')
+        conv = services.get_or_create_direct(alice, bob)
+        services.create_message(conv, bob, kind='text', text='salut')
+        self.assertEqual(post(ca, 'conversations/delete', {'ids': [conv.pk]}).json(), {'deleted': 1})
+        self.assertEqual(ca.get('/api/conversations').json()['results'], [])                   # disparue chez Alice
+        self.assertEqual(len(cb.get('/api/conversations').json()['results']), 1)                 # intacte chez Bob
+        self.assertEqual(ca.get(f'/api/conversations/{conv.pk}/messages').json()['results'], [])  # messages effacés pour elle
+        self.assertEqual(len(cb.get(f'/api/conversations/{conv.pk}/messages').json()['results']), 1)
+        services.create_message(conv, bob, kind='text', text='tu es là ?')
+        listed = ca.get('/api/conversations').json()['results']
+        self.assertEqual([c['id'] for c in listed], [conv.pk])                                    # revenue avec le nouveau message
+        self.assertEqual([m['text'] for m in ca.get(f'/api/conversations/{conv.pk}/messages').json()['results']], ['tu es là ?'])
+        # Pas de suppression des discussions des autres.
+        carol, cc = make_user('carol')
+        self.assertEqual(post(cc, 'conversations/delete', {'ids': [conv.pk]}).json(), {'deleted': 0})
+
+    def test_delete_calls_for_me_only(self):
+        from chat.models import Call
+        alice, ca = make_user('alice')
+        bob, cb = make_user('bob')
+        c1 = Call.objects.create(caller=alice, callee=bob, status='ended')
+        c2 = Call.objects.create(caller=bob, callee=alice, status='missed')
+        live = Call.objects.create(caller=alice, callee=bob, status='ongoing')
+        post(ca, 'calls/delete', {'ids': [c1.pk]})
+        self.assertEqual({c['id'] for c in ca.get('/api/calls').json()['results']}, {c2.pk, live.pk})
+        self.assertEqual(len(cb.get('/api/calls').json()['results']), 3)                          # Bob garde tout
+        post(ca, 'calls/delete', {'all': True})
+        self.assertEqual([c['id'] for c in ca.get('/api/calls').json()['results']], [live.pk])   # appel en cours conservé
+        self.assertEqual(post(ca, 'calls/delete', {}).status_code, 400)

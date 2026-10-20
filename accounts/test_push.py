@@ -125,3 +125,19 @@ class PushTests(TestCase):
         missed = self.sent()[-1]
         self.assertEqual(missed['kind'], 'missed_call')
         self.assertEqual(self.webpush.call_args.kwargs['headers']['Topic'], f'call-{call.pk}')
+
+    def test_app_badge_counts_unread_chats_and_notifications(self):
+        # Pastille de l'icône : discussions non lues + notifications non lues, propre à chaque destinataire.
+        from social.models import Post
+        jpost(self.cb, 'push/subscribe', subscription())
+        cid = jpost(self.ca, 'conversations/direct', {'user_id': self.bob.pk}).json()['id']
+        with self.captureOnCommitCallbacks(execute=True):
+            jpost(self.ca, f'conversations/{cid}/messages', {'text': 'Salut'})
+        self.assertEqual(self.sent()[-1]['badge'], 1)
+        with self.captureOnCommitCallbacks(execute=True):
+            jpost(self.ca, f'conversations/{cid}/messages', {'text': 'Tu es là ?'})
+        self.assertEqual(self.sent()[-1]['badge'], 1)           # même discussion : toujours 1
+        post = Post.objects.create(author=self.bob, caption='Photo')
+        with self.captureOnCommitCallbacks(execute=True):
+            jpost(self.ca, f'posts/{post.pk}/like')
+        self.assertEqual(self.sent()[-1]['badge'], 2)           # + la notification « J'aime »

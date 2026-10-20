@@ -221,15 +221,18 @@ export function promptDialog(title, { value = '', placeholder = '', multiline = 
 }
 
 /** Menu contextuel positionné près d'un élément ou d'un point. */
-export function menu(anchor, items, { x, y } = {}) {
+/** Menu contextuel. Éléments : { label, icon, action, danger, active, badge }, '-' (séparateur) ou
+ *  { title } (intitulé de section). `side: 'right'` : ouvert à droite de l'ancre (barre latérale). */
+export function menu(anchor, items, { x, y, side } = {}) {
   closeMenus();
   const list = h('div.menu', { role: 'menu' });
   for (const it of items.filter(Boolean)) {
     if (it === '-') { list.appendChild(h('div.menu-sep')); continue; }
-    list.appendChild(h('button.menu-item' + (it.danger ? '.danger' : ''), {
+    if (it.title) { list.appendChild(h('div.menu-title', it.title)); continue; }
+    list.appendChild(h('button.menu-item' + (it.danger ? '.danger' : '') + (it.active ? '.active' : ''), {
       type: 'button', role: 'menuitem',
       onclick: e => { e.stopPropagation(); closeMenus(); it.action(); },
-    }, it.icon ? icon(it.icon, 18) : null, h('span', it.label)));
+    }, it.icon ? icon(it.icon, 18) : null, h('span', it.label), it.badge ? h('span.menu-badge', it.badge > 99 ? '99+' : String(it.badge)) : null));
   }
   const layer = h('div.menu-layer', { onmousedown: e => { if (e.target === layer) closeMenus(); }, oncontextmenu: e => { e.preventDefault(); closeMenus(); } }, list);
   overlayRoot().appendChild(layer);
@@ -237,6 +240,7 @@ export function menu(anchor, items, { x, y } = {}) {
   const mw = list.offsetWidth, mh = list.offsetHeight;
   let left = anchor ? r.right - mw : x;
   let top = r.bottom + 4;
+  if (anchor && side === 'right') { left = r.right + 8; top = Math.min(r.top, window.innerHeight - mh - 8); }
   if (left < 8) left = Math.min(r.left, window.innerWidth - mw - 8);
   if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
   if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 4);
@@ -367,28 +371,175 @@ export function ringtone() {
 
 // ------------------------------------------------------------------ emoji
 
-export const EMOJIS = {
-  'Smileys': '😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖',
-  'Gestes': '👋 🤚 🖐 ✋ 🖖 👌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 💪 🦾 👀 👁 👄 💋 🧠 🫶',
-  'Cœurs': '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 🔥 ✨ 🌟 ⭐ 💯 💢 💥 💫 💦 💨',
-  'Animaux': '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🦄 🐝 🦋 🐢 🐍 🐙 🐬 🐳 🦈 🌸 🌹 🌻 🌴 🌈 ☀️ 🌙 ⚡ ❄️',
-  'Nourriture': '🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🥭 🍍 🥥 🥑 🍅 🌽 🥕 🍞 🧀 🍗 🍖 🍔 🍟 🍕 🌭 🌮 🍣 🍜 🍩 🍪 🎂 🍰 🍫 🍿 ☕ 🍵 🍺 🍷 🥂 🍾',
-  'Activités': '⚽ 🏀 🏈 ⚾ 🎾 🏐 🏉 🎱 🏓 🥊 🎮 🎲 🎯 🎳 🎸 🎹 🎤 🎧 🎬 🎨 🏆 🥇 🎉 🎊 🎁 🎈 🚗 ✈️ 🚀 🏠 💻 📱 📷 💡 💰 📚 ✅ ❌ ❓ ❗',
-};
+// Catégories dans l'ordre de WhatsApp : [clé, titre, icône de la barre du bas, emojis].
+export const EMOJI_CATEGORIES = [
+  ['people', 'Smileys et personnes', 'smile',
+    '😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 🫠 😉 😊 😇 🥰 😍 🤩 😘 😗 ☺️ 😚 😙 🥲 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🫢 🫣 🤫 🤔 🫡 🤐 🤨 😐 😑 😶 🫥 😏 😒 🙄 😬 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 🥸 😎 🤓 🧐 😕 🫤 😟 🙁 ☹️ 😮 😯 😲 😳 🥺 🥹 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👹 👺 👻 👽 👾 🤖 😺 😸 😹 😻 😼 😽 🙀 😿 😾 🙈 🙉 🙊 ' +
+    '👋 🤚 🖐️ ✋ 🖖 🫱 🫲 👌 🤌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 🫵 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 🫶 👐 🤲 🤝 🙏 ✍️ 💅 🤳 💪 🦾 🦵 🦶 👂 👃 🧠 👀 👁️ 👅 👄 💋 ' +
+    '👶 🧒 👦 👧 🧑 👱 👨 🧔 👩 🧓 👴 👵 🙍 🙎 🙅 🙆 💁 🙋 🧏 🙇 🤦 🤷 👮 🕵️ 💂 👷 🤴 👸 👳 👲 🧕 🤵 👰 🤰 🤱 👼 🎅 🤶 🦸 🦹 🧙 🧚 🧛 🧜 🧝 🧞 🧟 💆 💇 🚶 🧍 🧎 🏃 💃 🕺 👯 🧖 🧗 🤺 🏇 ⛷️ 🏂 🏌️ 🏄 🚣 🏊 ⛹️ 🏋️ 🚴 🤸 🤼 🤽 🤾 🤹 🧘 🛀 🛌 👭 👫 👬 💏 💑 👪 🗣️ 👤 👥 👣 ' +
+    '👓 🕶️ 🥽 👔 👕 👖 🧣 🧤 🧥 🧦 👗 👘 🥻 👙 👚 👛 👜 👝 🎒 👞 👟 🥾 🥿 👠 👡 👢 👑 👒 🎩 🎓 🧢 💄 💍 💼'],
+  ['nature', 'Animaux et nature', 'paw',
+    '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐻‍❄️ 🐨 🐯 🦁 🐮 🐷 🐽 🐸 🐵 🐔 🐧 🐦 🐤 🐣 🐥 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🪱 🐛 🦋 🐌 🐞 🐜 🪰 🪲 🦟 🦗 🕷️ 🦂 🐢 🐍 🦎 🦖 🦕 🐙 🦑 🦐 🦞 🦀 🐡 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🦧 🐘 🦛 🦏 🐪 🐫 🦒 🦘 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🦙 🐐 🦌 🐕 🐩 🐈 🐓 🦃 🦚 🦜 🦢 🦩 🕊️ 🐇 🦝 🦨 🦡 🦦 🦥 🐁 🐀 🐿️ 🦔 ' +
+    '🌵 🎄 🌲 🌳 🌴 🪵 🌱 🌿 ☘️ 🍀 🎍 🪴 🎋 🍃 🍂 🍁 🍄 🐚 🪨 🌾 💐 🌷 🌹 🥀 🌺 🌸 🌼 🌻 🌞 🌝 🌛 🌜 🌚 🌕 🌖 🌗 🌘 🌑 🌒 🌓 🌔 🌙 🌎 🌍 🌏 🪐 💫 ⭐ 🌟 ✨ ⚡ ☄️ 💥 🔥 🌪️ 🌈 ☀️ 🌤️ ⛅ 🌥️ ☁️ 🌦️ 🌧️ ⛈️ 🌩️ 🌨️ ❄️ ☃️ ⛄ 🌬️ 💨 💧 💦 ☔ ☂️ 🌊 🌫️'],
+  ['food', 'Nourriture et boissons', 'coffee',
+    '🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🍆 🥑 🥦 🥬 🥒 🌶️ 🫑 🌽 🥕 🫒 🧄 🧅 🥔 🍠 🥐 🥯 🍞 🥖 🥨 🧀 🥚 🍳 🧈 🥞 🧇 🥓 🥩 🍗 🍖 🌭 🍔 🍟 🍕 🫓 🥪 🥙 🧆 🌮 🌯 🫔 🥗 🥘 🫕 🥫 🍝 🍜 🍲 🍛 🍣 🍱 🥟 🦪 🍤 🍙 🍚 🍘 🍥 🥠 🥮 🍢 🍡 🍧 🍨 🍦 🥧 🧁 🍰 🎂 🍮 🍭 🍬 🍫 🍿 🍩 🍪 🌰 🥜 🍯 🥛 🍼 🫖 ☕ 🍵 🧃 🥤 🧋 🍶 🍺 🍻 🥂 🍷 🥃 🍸 🍹 🧉 🍾 🧊 🥄 🍴 🍽️ 🥣 🥡 🥢 🧂'],
+  ['activity', 'Activités', 'ball',
+    '⚽ 🏀 🏈 ⚾ 🥎 🎾 🏐 🏉 🥏 🎱 🪀 🏓 🏸 🏒 🏑 🥍 🏏 🪃 🥅 ⛳ 🪁 🏹 🎣 🤿 🥊 🥋 🎽 🛹 🛼 🛷 ⛸️ 🥌 🎿 🏆 🥇 🥈 🥉 🏅 🎖️ 🏵️ 🎗️ 🎫 🎟️ 🎪 🎭 🩰 🎨 🎬 🎤 🎧 🎼 🎹 🥁 🪘 🎷 🎺 🪗 🎸 🪕 🎻 🎲 ♟️ 🎯 🎳 🎮 🎰 🧩 🎉 🎊 🎈 🎁 🎀 🪅 🎆 🎇 🧨 🎃 🎄 🎋 🎍 🎎 🎏 🎐 🎑 🧧'],
+  ['travel', 'Voyages et lieux', 'car',
+    '🚗 🚕 🚙 🚌 🚎 🏎️ 🚓 🚑 🚒 🚐 🛻 🚚 🚛 🚜 🦯 🦽 🦼 🛴 🚲 🛵 🏍️ 🛺 🚨 🚔 🚍 🚘 🚖 🚡 🚠 🚟 🚃 🚋 🚞 🚝 🚄 🚅 🚈 🚂 🚆 🚇 🚊 🚉 ✈️ 🛫 🛬 🛩️ 💺 🛰️ 🚀 🛸 🚁 🛶 ⛵ 🚤 🛥️ 🛳️ ⛴️ 🚢 ⚓ 🪝 ⛽ 🚧 🚦 🚥 🚏 🗺️ 🗿 🗽 🗼 🏰 🏯 🏟️ 🎡 🎢 🎠 ⛲ ⛱️ 🏖️ 🏝️ 🏜️ 🌋 ⛰️ 🏔️ 🗻 🏕️ ⛺ 🛖 🏠 🏡 🏘️ 🏚️ 🏗️ 🏭 🏢 🏬 🏣 🏤 🏥 🏦 🏨 🏪 🏫 🏩 💒 🏛️ ⛪ 🕌 🕍 🛕 🕋 ⛩️ 🛤️ 🛣️ 🗾 🎑 🏞️ 🌅 🌄 🌠 🎇 🎆 🌇 🌆 🏙️ 🌃 🌌 🌉 🌁'],
+  ['objects', 'Objets', 'bulb',
+    '⌚ 📱 📲 💻 ⌨️ 🖥️ 🖨️ 🖱️ 🖲️ 🕹️ 🗜️ 💽 💾 💿 📀 📼 📷 📸 📹 🎥 📽️ 🎞️ 📞 ☎️ 📟 📠 📺 📻 🎙️ 🎚️ 🎛️ 🧭 ⏱️ ⏲️ ⏰ 🕰️ ⌛ ⏳ 📡 🔋 🔌 💡 🔦 🕯️ 🪔 🧯 🛢️ 💸 💵 💴 💶 💷 🪙 💰 💳 💎 ⚖️ 🪜 🧰 🪛 🔧 🔨 ⚒️ 🛠️ ⛏️ 🪚 🔩 ⚙️ 🪤 🧱 ⛓️ 🧲 🔫 💣 🧨 🪓 🔪 🗡️ ⚔️ 🛡️ 🚬 ⚰️ 🪦 ⚱️ 🏺 🔮 📿 🧿 💈 ⚗️ 🔭 🔬 🕳️ 🩹 🩺 💊 💉 🩸 🧬 🦠 🧫 🧪 🌡️ 🧹 🪠 🧺 🧻 🚽 🚰 🚿 🛁 🛀 🧼 🪥 🪒 🧽 🪣 🧴 🛎️ 🔑 🗝️ 🚪 🪑 🛋️ 🛏️ 🛌 🧸 🪆 🖼️ 🪞 🪟 🛍️ 🛒 🎁 🎈 🎏 🎀 🪄 🪅 🎊 🎉 🎎 🏮 🎐 🧧 ✉️ 📩 📨 📧 💌 📥 📤 📦 🏷️ 🪧 📪 📫 📬 📭 📮 📯 📜 📃 📄 📑 🧾 📊 📈 📉 🗒️ 🗓️ 📆 📅 🗑️ 📇 🗃️ 🗳️ 🗄️ 📋 📁 📂 🗂️ 🗞️ 📰 📓 📔 📒 📕 📗 📘 📙 📚 📖 🔖 🧷 🔗 📎 🖇️ 📐 📏 🧮 📌 📍 ✂️ 🖊️ 🖋️ ✒️ 🖌️ 🖍️ 📝 ✏️ 🔍 🔎 🔏 🔐 🔒 🔓'],
+  ['symbols', 'Symboles', 'symbols',
+    '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❤️‍🔥 ❤️‍🩹 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉️ ☸️ ✡️ 🔯 🕎 ☯️ ☦️ 🛐 ⛎ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ 🆔 ⚛️ 🉑 ☢️ ☣️ 📴 📳 🈶 🈚 🈸 🈺 🈷️ ✴️ 🆚 💮 🉐 ㊙️ ㊗️ 🈴 🈵 🈹 🈲 🅰️ 🅱️ 🆎 🆑 🅾️ 🆘 ❌ ⭕ 🛑 ⛔ 📛 🚫 💯 💢 ♨️ 🚷 🚯 🚳 🚱 🔞 📵 🚭 ❗ ❕ ❓ ❔ ‼️ ⁉️ 🔅 🔆 〽️ ⚠️ 🚸 🔱 ⚜️ 🔰 ♻️ ✅ 🈯 💹 ❇️ ✳️ ❎ 🌐 💠 Ⓜ️ 🌀 💤 🏧 🚾 ♿ 🅿️ 🛗 🈳 🈂️ 🛂 🛃 🛄 🛅 🚹 🚺 🚼 ⚧️ 🚻 🚮 🎦 📶 🈁 🔣 ℹ️ 🔤 🔡 🔠 🆖 🆗 🆙 🆒 🆕 🆓 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣ 🔟 🔢 #️⃣ *️⃣ ⏏️ ▶️ ⏸️ ⏯️ ⏹️ ⏺️ ⏭️ ⏮️ ⏩ ⏪ ⏫ ⏬ ◀️ 🔼 🔽 ➡️ ⬅️ ⬆️ ⬇️ ↗️ ↘️ ↙️ ↖️ ↕️ ↔️ ↪️ ↩️ ⤴️ ⤵️ 🔀 🔁 🔂 🔄 🔃 🎵 🎶 ➕ ➖ ➗ ✖️ 🟰 ♾️ 💲 💱 ™️ ©️ ®️ 〰️ ➰ ➿ 🔚 🔙 🔛 🔝 🔜 ✔️ ☑️ 🔘 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟤 🔺 🔻 🔸 🔹 🔶 🔷 🔳 🔲 ▪️ ▫️ ◾ ◽ ◼️ ◻️ 🟥 🟧 🟨 🟩 🟦 🟪 ⬛ ⬜ 🟫 🔈 🔇 🔉 🔊 🔔 🔕 📣 📢 💬 💭 🗯️ ♠️ ♣️ ♥️ ♦️ 🃏 🎴 🀄 🕐 🕑 🕒 🕓 🕔 🕕 🕖 🕗 🕘 🕙 🕚 🕛'],
+  ['flags', 'Drapeaux', 'flag',
+    '🇨🇮 🏳️ 🏴 🏁 🚩 🏳️‍🌈 🇿🇦 🇩🇿 🇦🇴 🇧🇯 🇧🇼 🇧🇫 🇧🇮 🇨🇲 🇨🇻 🇨🇫 🇹🇩 🇰🇲 🇨🇬 🇨🇩 🇩🇯 🇪🇬 🇬🇶 🇪🇷 🇸🇿 🇪🇹 🇬🇦 🇬🇲 🇬🇭 🇬🇳 🇬🇼 🇰🇪 🇱🇸 🇱🇷 🇱🇾 🇲🇬 🇲🇼 🇲🇱 🇲🇷 🇲🇺 🇲🇦 🇲🇿 🇳🇦 🇳🇪 🇳🇬 🇷🇼 🇸🇹 🇸🇳 🇸🇨 🇸🇱 🇸🇴 🇸🇸 🇸🇩 🇹🇿 🇹🇬 🇹🇳 🇺🇬 🇿🇲 🇿🇼 🇫🇷 🇧🇪 🇨🇭 🇨🇦 🇺🇸 🇬🇧 🇩🇪 🇪🇸 🇮🇹 🇵🇹 🇳🇱 🇱🇺 🇮🇪 🇸🇪 🇳🇴 🇩🇰 🇫🇮 🇵🇱 🇷🇺 🇺🇦 🇹🇷 🇬🇷 🇧🇷 🇦🇷 🇲🇽 🇨🇴 🇭🇹 🇨🇺 🇯🇲 🇨🇳 🇯🇵 🇰🇷 🇮🇳 🇵🇰 🇸🇦 🇦🇪 🇶🇦 🇱🇧 🇮🇱 🇵🇸 🇦🇺 🇳🇿 🇪🇺 🇺🇳'],
+];
+
+// Mots-clés (sans accents) pour la recherche d'emoji.
+const EMOJI_KEYWORDS = [
+  ['rire rigole mdr lol drole content joie heureux sourire', '😂 🤣 😆 😄 😁 😀 😃 😅 😹 🙂 😊'],
+  ['amour love coeur aime bisou bebe cheri', '❤️ 🥰 😍 😘 😚 💕 💖 💗 💘 💞 💓 💋 🫶 😻 🤍 💛 💚 💙 💜 🧡 🖤'],
+  ['triste pleure larme chagrin', '😢 😭 🥲 😞 😔 😿 💔 🥺 😥 😓'],
+  ['colere fache enerve rage', '😡 😠 🤬 😤 👿 💢'],
+  ['peur choc surpris wow', '😱 😨 😰 😮 😲 😳 🙀 😯'],
+  ['fatigue dodo sommeil dormir nuit', '😴 🥱 😪 💤 🛌 🌙 🌛'],
+  ['malade fievre masque', '😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶'],
+  ['ok bien top pouce bravo accord valide', '👍 👌 🙌 👏 ✅ ✔️ 💯 🆗 🤙'],
+  ['non pas refuse', '👎 ❌ 🙅 🚫 ⛔ ✖️'],
+  ['merci priere svp stp amen dieu', '🙏 🛐 ✝️ ☪️ 😇'],
+  ['salut bonjour coucou au revoir main', '👋 🤚 ✋ 🖐️ 🙋'],
+  ['fete anniversaire joyeux bravo felicitations', '🎉 🎊 🥳 🎂 🎁 🎈 🍾 🥂 🎆 🎇'],
+  ['feu chaud hot fire', '🔥 🥵 🌶️ ☀️'],
+  ['cool lunettes classe', '😎 🕶️ 🤓 🆒'],
+  ['reflechir pense hmm', '🤔 🧐 🤨 💭'],
+  ['secret chut silence', '🤫 🤐 🙊 😶'],
+  ['argent money sous billet riche', '💰 💵 💸 🤑 💳 🪙 💶 💷 💴 🏦'],
+  ['muscle force sport gym', '💪 🏋️ 🦾 🏃 ⚽ 🏀'],
+  ['foot football ballon match', '⚽ 🥅 🏆 🏟️ 🇨🇮'],
+  ['musique chanson chanter danse', '🎵 🎶 🎤 🎧 💃 🕺 🎸 🥁'],
+  ['manger nourriture repas faim', '🍽️ 🍔 🍕 🍗 🍛 🍲 🍚 🥘 🍟 🍜'],
+  ['boire boisson the cafe', '☕ 🍵 🥤 🧃 🍺 🍷 🥂 🍹 🧋'],
+  ['fruit banane mangue ananas', '🍌 🥭 🍍 🍉 🍊 🍎 🍓 🥥 🍇'],
+  ['soleil chaleur beau temps', '☀️ 🌞 🌤️ 😎 🏖️'],
+  ['pluie orage nuage', '🌧️ ⛈️ ☔ ☁️ 🌩️ 💧'],
+  ['fleur rose nature', '🌹 🌸 🌺 🌻 🌷 💐 🌼'],
+  ['chien chat animal', '🐶 🐕 🐱 🐈 🐭 🐰'],
+  ['voiture taxi bus voyage', '🚗 🚕 🚙 🚌 ✈️ 🚀 🏍️ 🛵'],
+  ['maison domicile', '🏠 🏡 🏘️ 🛋️'],
+  ['ecole etude livre cours examen', '🏫 📚 📖 🎓 ✏️ 📝'],
+  ['travail bureau ordinateur', '💼 💻 🖥️ 📊 📈 🏢'],
+  ['telephone appel', '📱 📞 ☎️ 📲'],
+  ['photo camera', '📷 📸 🎥 📹'],
+  ['etoile brillant magie', '⭐ 🌟 ✨ 💫 🪄'],
+  ['diable demon', '😈 👿'],
+  ['mort crane rip', '💀 ☠️ ⚰️ 🪦'],
+  ['caca crotte', '💩'],
+  ['clin oeil', '😉 😜'],
+  ['langue', '😛 😜 😝 🤪 😋'],
+  ['ange', '😇 👼'],
+  ['bebe enfant', '👶 🍼 🧒'],
+  ['cote ivoire ivoirien abidjan', '🇨🇮'],
+  ['afrique drapeau', '🇨🇮 🇸🇳 🇨🇲 🇳🇬 🇬🇭 🇲🇱 🇧🇫 🇹🇬 🇧🇯 🇬🇳'],
+  ['france francais', '🇫🇷'],
+  ['regarder yeux voir', '👀 👁️ 🙈'],
+  ['main applaudir', '👏 🙌 🤝 🙏'],
+];
+
+const RECENT_EMOJI_KEY = 'kozons.emoji.recent';
+const noAccent = t => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+function recentEmojis() {
+  try { return JSON.parse(localStorage.getItem(RECENT_EMOJI_KEY)) || []; } catch (e) { return []; }
+}
+
+function rememberEmoji(e) {
+  try { localStorage.setItem(RECENT_EMOJI_KEY, JSON.stringify([e, ...recentEmojis().filter(x => x !== e)].slice(0, 32))); } catch (e2) { /* stockage indisponible */ }
+}
+
+function searchEmojis(q) {
+  q = noAccent(q.trim());
+  if (!q) return [];
+  const found = [];
+  for (const [words, list] of EMOJI_KEYWORDS) {
+    if (words.split(' ').some(w => w.startsWith(q))) found.push(...list.split(' '));
+  }
+  if (q.length >= 3) {
+    for (const [, label, , list] of EMOJI_CATEGORIES) if (noAccent(label).includes(q)) found.push(...list.split(' '));
+  }
+  return [...new Set(found)];
+}
 
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
-export function emojiPicker(onPick) {
-  const cats = Object.keys(EMOJIS);
-  const grid = h('div.emoji-grid');
-  const tabs = h('div.emoji-tabs');
-  const show = cat => {
-    clear(grid, ...EMOJIS[cat].split(' ').map(e => h('button.emoji', { type: 'button', onclick: () => onPick(e) }, e)));
-    tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
+/**
+ * Sélecteur d'emoji façon WhatsApp : défilement continu par sections (Récents, Smileys et personnes…),
+ * barre des catégories en bas qui suit le défilement, recherche par mot-clé (« rire », « merci »…).
+ * `searchOpen: false` : champ de recherche masqué, ouvert par `picker.toggleSearch()` (panneau du chat).
+ */
+export function emojiPicker(onPick, { searchOpen = true } = {}) {
+  const pick = e => { rememberEmoji(e); onPick(e); };
+  const emojiBtn = e => h('button.emoji', { type: 'button', onclick: () => pick(e) }, e);
+  const scroll = h('div.emoji-scroll');
+  const cats = h('div.emoji-cats');
+  const sections = [];
+  const recentGrid = h('div.emoji-grid');
+  const recentSec = h('section.emoji-section', { dataset: { cat: 'recent' } }, h('div.emoji-sec-title', 'Récents'), recentGrid);
+  const refreshRecent = () => {
+    const list = recentEmojis();
+    clear(recentGrid, list.map(emojiBtn));
+    recentSec.classList.toggle('hidden', !list.length);
   };
-  cats.forEach(cat => tabs.appendChild(h('button', { type: 'button', dataset: { cat }, title: cat, onclick: () => show(cat) }, EMOJIS[cat].split(' ')[0])));
-  show(cats[0]);
-  return h('div.emoji-picker', tabs, grid);
+  sections.push(recentSec);
+  for (const [key, label, , list] of EMOJI_CATEGORIES) {
+    sections.push(h('section.emoji-section', { dataset: { cat: key } }, h('div.emoji-sec-title', label), h('div.emoji-grid', list.split(' ').map(emojiBtn))));
+  }
+  const results = h('div.emoji-grid');
+  const resultsSec = h('section.emoji-section.hidden', h('div.emoji-sec-title', 'Résultats'), results);
+  scroll.append(resultsSec, ...sections);
+
+  const setActive = key => cats.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.cat === key));
+  const goTo = key => {
+    if (input.value) { input.value = ''; runSearch(); }
+    const sec = sections.find(s => s.dataset.cat === key);
+    scroll.scrollTop = sec.offsetTop - 2;
+    setActive(key);
+  };
+  [['recent', 'Récents', 'clock'], ...EMOJI_CATEGORIES].forEach(([key, label, ic]) =>
+    cats.appendChild(h('button', { type: 'button', title: label, 'aria-label': label, dataset: { cat: key }, onclick: () => goTo(key) }, icon(ic, 22))));
+  // La catégorie active suit le défilement.
+  scroll.addEventListener('scroll', () => {
+    if (input.value) return;
+    const y = scroll.scrollTop + 12;
+    let current = sections.find(s => !s.classList.contains('hidden'));
+    for (const s of sections) if (!s.classList.contains('hidden') && s.offsetTop <= y) current = s;
+    if (current) setActive(current.dataset.cat);
+  }, { passive: true });
+
+  // Recherche.
+  const input = h('input.emoji-search-input', { type: 'search', placeholder: 'Rechercher un emoji', 'aria-label': 'Rechercher un emoji', enterkeyhint: 'search' });
+  const searchBar = h('div.emoji-search' + (searchOpen ? '' : '.hidden'), icon('search', 18), input);
+  const runSearch = () => {
+    const q = input.value.trim();
+    const found = searchEmojis(q);
+    resultsSec.classList.toggle('hidden', !q);
+    sections.forEach(s => s.classList.toggle('search-hidden', !!q));
+    resultsSec.firstChild.textContent = found.length ? 'Résultats' : 'Aucun emoji trouvé';
+    clear(results, found.map(emojiBtn));
+    root.classList.toggle('searching', !!q);
+    scroll.scrollTop = 0;
+  };
+  input.addEventListener('input', runSearch);
+
+  const root = h('div.emoji-picker', searchBar, scroll, cats);
+  root.refreshRecent = () => { refreshRecent(); if (!input.value) setActive(recentSec.classList.contains('hidden') ? 'people' : 'recent'); };
+  root.toggleSearch = (open = searchBar.classList.contains('hidden')) => {
+    searchBar.classList.toggle('hidden', !open);
+    if (open) input.focus();
+    else if (input.value) { input.value = ''; runSearch(); }
+    return open;
+  };
+  root.refreshRecent();
+  return root;
 }
 
 /** Sélecteur d'emoji en surimpression, placé au-dessus ou en dessous du bouton selon la place
@@ -410,4 +561,78 @@ export function emojiPopover(anchor, onPick) {
   pop.style.top = top + 'px';
   pop.style.left = left + 'px';
   return layer;
+}
+
+// ------------------------------------------------------------------ appui long (sélection, comme WhatsApp)
+
+/** Appui long au doigt (~0,5 s) : appelle fn. Le clic qui suit est ignoré, et le menu natif
+    du navigateur (Android, iOS) est remplacé. Sur ordinateur, rien ne change (clic droit libre). */
+export function onLongPress(el, fn, ms = 480) {
+  let timer = null, sx = 0, sy = 0, firedAt = 0;
+  const fire = e => { firedAt = Date.now(); if (navigator.vibrate) navigator.vibrate(15); fn(e); };
+  el.addEventListener('touchstart', e => {
+    const p = e.touches[0];
+    sx = p.clientX; sy = p.clientY;
+    clearTimeout(timer);
+    timer = setTimeout(() => fire(e), ms);
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    const p = e.touches[0];
+    if (Math.abs(p.clientX - sx) + Math.abs(p.clientY - sy) > 10) clearTimeout(timer);
+  }, { passive: true });
+  ['touchend', 'touchcancel'].forEach(ev => el.addEventListener(ev, () => clearTimeout(timer)));
+  // Android déclenche aussi « contextmenu » sur un appui long : même action, sans doublon.
+  el.addEventListener('contextmenu', e => {
+    if (!window.matchMedia('(pointer: coarse)').matches) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    clearTimeout(timer);
+    if (Date.now() - firedAt > 800) fire(e);
+  }, true);
+  el.addEventListener('click', e => {
+    if (Date.now() - firedAt < 800) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+}
+
+/**
+ * Panneau latéral redimensionnable à la souris (comme WhatsApp Desktop) : une poignée sur le bord droit.
+ * La largeur est mémorisée par `key` ; double-clic sur la poignée = largeur par défaut. Ordinateur uniquement.
+ */
+export function resizablePanel(panel, key, { min = 260, max = 720 } = {}) {
+  const storeKey = 'kozons.width.' + key;
+  const clamp = w => Math.round(Math.max(min, Math.min(w, max, window.innerWidth * 0.6)));
+  const apply = w => panel.style.setProperty('--side-w', w + 'px');
+  // Au chargement, pas de limite liée à la fenêtre (le CSS plafonne à 60vw) : la largeur choisie revient
+  // telle quelle quand la fenêtre est à nouveau assez grande.
+  try { const saved = +localStorage.getItem(storeKey); if (saved) apply(Math.max(min, Math.min(saved, max))); } catch (e) { /* stockage indisponible */ }
+  const save = w => { try { localStorage.setItem(storeKey, String(w)); } catch (e) { /* stockage indisponible */ } };
+  const handle = h('div.resize-handle', { role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Ajuster la largeur', title: 'Glisser pour ajuster la largeur (double-clic : par défaut)', tabindex: 0 });
+  handle.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX, startW = panel.getBoundingClientRect().width;
+    let w = startW;
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add('col-resizing');
+    const move = ev => { w = clamp(startW + ev.clientX - startX); apply(w); };
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      document.body.classList.remove('col-resizing');
+      save(w);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+  handle.addEventListener('dblclick', () => { panel.style.removeProperty('--side-w'); try { localStorage.removeItem(storeKey); } catch (e) { /* stockage indisponible */ } });
+  handle.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const w = clamp(panel.getBoundingClientRect().width + (e.key === 'ArrowRight' ? 20 : -20));
+    apply(w); save(w);
+  });
+  panel.appendChild(handle);
+  return handle;
 }

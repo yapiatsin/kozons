@@ -65,7 +65,7 @@ def conversations_for(user, only_ids=None):
     now = timezone.now()
     last_msg = (Message.objects.filter(conversation_id=OuterRef('conversation_id'), id__gt=OuterRef('cleared_before_id'))
                 .exclude(hidden_for__user=user).exclude(expires_at__lte=now).order_by('-id').values('id')[:1])
-    parts = (Participant.objects.filter(user=user)
+    parts = (Participant.objects.filter(user=user, hidden=False)
              .select_related('conversation')
              .prefetch_related(Prefetch('conversation__participants',
                                         queryset=Participant.objects.select_related('user').order_by('joined_at')))
@@ -143,6 +143,8 @@ def create_message(conversation, sender, mentions=None, **fields):
         if mentions:
             msg.mentions.set(mentions)
         Conversation.objects.filter(pk=conversation.pk).update(updated_at=msg.created_at)
+        # Discussion supprimée par un membre : elle revient dans sa liste avec ce nouveau message.
+        Participant.objects.filter(conversation=conversation, hidden=True).update(hidden=False)
         if sender is not None:
             Participant.objects.filter(conversation=conversation, user=sender).update(
                 last_read_id=msg.pk, last_delivered_id=msg.pk, marked_unread=False)

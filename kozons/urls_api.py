@@ -5,6 +5,8 @@ from chat import stickers
 from chat import views as chat
 from live import views as live
 from meet import views as meet
+from brady import views as brady
+from shop import views as shop
 from social import views as social
 
 urlpatterns = [
@@ -39,6 +41,7 @@ urlpatterns = [
     path('conversations', chat.conversation_list),
     path('conversations/direct', chat.start_direct),
     path('conversations/group', chat.create_group),
+    path('conversations/delete', chat.delete_conversations),
     path('conversations/<int:pk>', chat.conversation_detail),
     path('conversations/<int:pk>/update', chat.update_conversation),
     path('conversations/<int:pk>/settings', chat.conversation_settings),
@@ -60,6 +63,7 @@ urlpatterns = [
     path('stickers', stickers.sticker_collection),
     path('stickers/<int:pk>', stickers.sticker_action),
     path('calls', chat.call_history),
+    path('calls/delete', chat.delete_calls),
     path('calls/ice', chat.ice_servers),
 
     # Lives
@@ -79,6 +83,36 @@ urlpatterns = [
     path('meet/<str:code>/update', meet.meeting_update),
     path('meet/<str:code>/cancel', meet.meeting_cancel),
     path('meet/<str:code>/messages', meet.meeting_messages),
+
+    # Brady (assistant IA)
+    path('brady/chat', brady.chat),
+    path('brady/threads', brady.threads),
+    path('brady/threads/clear', brady.threads_clear),
+    path('brady/threads/<int:pk>', brady.thread_detail),
+    path('brady/threads/<int:pk>/delete', brady.thread_delete),
+
+    # Boutiques
+    path('shop/me', shop.my_shop),
+    path('shop/me/categories', shop.categories),
+    path('shop/me/products', shop.my_products),
+    path('shop/me/products/<int:pk>/update', shop.product_update),
+    path('shop/me/products/<int:pk>/delete', shop.product_delete),
+    path('shop/me/orders', shop.shop_orders),
+    path('shop/me/stats', shop.shop_stats),
+    path('shop/market', shop.marketplace),
+    path('shop/products/<int:pk>', shop.product_detail),
+    path('shop/user/<int:user_id>', shop.shop_of_user),
+    path('shop/cart', shop.cart),
+    path('shop/cart/set', shop.cart_set),
+    path('shop/checkout', shop.checkout),
+    path('shop/orders', shop.my_orders),
+    path('shop/orders/<int:pk>', shop.order_detail),
+    path('shop/orders/<int:pk>/<str:action>', shop.order_action),
+    path('shop/s/<slug:slug>', shop.shop_detail),
+    path('shop/subscription', shop.subscription),
+    path('shop/subscription/pay', shop.subscription_pay),
+    path('shop/subscription/payments/<int:pk>', shop.subscription_payment),
+    path('shop/geniuspay/webhook', shop.geniuspay_webhook),
 
     # Social
     path('feed', social.feed),
