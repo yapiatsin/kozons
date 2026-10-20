@@ -1124,8 +1124,9 @@ function setupDrop(target) {
 
 // ------------------------------------------------------------------ messages vocaux
 
-// Formats préférés : AAC (lisible partout) puis Opus. Le serveur convertit de toute façon en AAC.
-const REC_TYPES = ['audio/mp4;codecs=mp4a.40.2', 'audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm'];
+// Opus d'abord : l'enregistrement le plus fiable sur Android (l'AAC de Chrome, récent, donne des fichiers
+// muets sur certains téléphones). iPhone enregistre en AAC (seul format proposé). Le serveur convertit tout en AAC.
+const REC_TYPES = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm'];
 const WAVE_LEVELS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
 
 /** Niveaux enregistrés (0..1) → 48 barres codées en lettres (envoyées avec le vocal). */
@@ -1214,6 +1215,10 @@ async function startRecording() {
     if (cancelled || !chunks.length) return;
     const secs = elapsed();
     if (secs < 0.8) return toast('Message vocal trop court.');
+    // Aucun son capté (micro coupé, utilisé par une autre application…) : on prévient au lieu d'envoyer du silence.
+    if (analyser && levels.length > 10 && Math.max(...levels) < 0.004) {
+      return toast('Aucun son n’a été capté : vérifiez que le micro n’est pas coupé ou utilisé par une autre application.', { type: 'error', timeout: 7000 });
+    }
     const type = rec.mimeType || 'audio/webm';
     const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm';
     const file = new File(chunks, `vocal-${Date.now()}.${ext}`, { type: type.split(';')[0] });

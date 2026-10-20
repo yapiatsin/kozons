@@ -350,15 +350,16 @@ video.media { cursor: default; }
 .vp-thumb { position: absolute; top: 50%; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border-radius: 50%; background: var(--vp-dot); left: 0; }
 .vp-foot { display: flex; height: 16px; padding: 1px 0 0 7px; }
 .vp-time { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
-.vp-side { position: relative; flex-shrink: 0; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; }
+.vp-side { position: relative; flex-shrink: 0; width: 46px; height: 44px; display: flex; align-items: center; justify-content: center; }
 .vp-mic { position: absolute; bottom: -2px; display: flex; color: var(--vp-dot); filter: drop-shadow(0 0 1.5px var(--bubble-in)); }
 .voice:not(.mine) .vp-mic { left: -8px; }
 .voice.mine .vp-mic { right: -8px; filter: drop-shadow(0 0 1.5px var(--bubble-out)); }
 .vp-mic svg { stroke-width: 2.4; }
-.vp-speed { display: none; height: 30px; min-width: 44px; padding: 0 10px; border-radius: 15px; font-size: 13.5px; font-weight: 600;
-  background: rgba(134, 150, 160, .2); color: var(--text); }
+.vp-speed { display: none; width: 46px; height: 28px; padding: 0; border-radius: 14px; white-space: nowrap; text-align: center;
+  line-height: 28px; font-size: 13px; font-weight: 700; letter-spacing: -.02em; background: rgba(134, 150, 160, .22); color: var(--text); }
 .voice.active .vp-side > :not(.vp-speed) { display: none; }
 .voice.active .vp-speed { display: block; }
+.vp-main { padding-right: 6px; }  /* le point en fin d'onde reste dans la bulle */
 .voice .doc-icon { width: 44px; height: 44px; }
 /* L'heure du message remonte sur la ligne de la durée (comme WhatsApp). */
 .bubble:has(.voice) .meta { margin-top: -18px; }
