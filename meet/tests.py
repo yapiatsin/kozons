@@ -22,9 +22,9 @@ class MeetApiTests(TestCase):
     def setUp(self):
         cache.clear()
         registry.reset()
-        self.host = User.objects.create_user('host', password='x', display_name='Organisatrice')
-        self.guest = User.objects.create_user('guest', password='x', display_name='Invité')
-        self.other = User.objects.create_user('other', password='x')
+        self.host = User.objects.create_user('host', password='x', display_name='Organisatrice', can_connect=True)
+        self.guest = User.objects.create_user('guest', password='x', display_name='Invité', can_connect=True)
+        self.other = User.objects.create_user('other', password='x', can_connect=True)
         self.ch, self.cg, self.co = Client(), Client(), Client()
         self.ch.force_login(self.host)
         self.cg.force_login(self.guest)
@@ -108,8 +108,8 @@ def make_notes(host, guest):
 
 class MeetAiTests(TestCase):
     def setUp(self):
-        self.host = User.objects.create_user('host', password='x', display_name='Organisatrice')
-        self.guest = User.objects.create_user('guest', password='x', display_name='Invité')
+        self.host = User.objects.create_user('host', password='x', display_name='Organisatrice', can_connect=True)
+        self.guest = User.objects.create_user('guest', password='x', display_name='Invité', can_connect=True)
 
     def test_document_includes_speakers_and_chat(self):
         doc, has_content = ai.build_document(make_notes(self.host, self.guest))
@@ -137,7 +137,7 @@ class MeetAiTests(TestCase):
         self.assertEqual((detail['title'], len(detail['transcript']), len(detail['chat'])), ('Lancement v2', 2, 1))
         self.assertEqual([n['id'] for n in client.get('/api/meet/notes').json()['results']], [notes.pk])
         stranger = Client()
-        stranger.force_login(User.objects.create_user('x', password='x'))
+        stranger.force_login(User.objects.create_user('x', password='x', can_connect=True))
         self.assertEqual(stranger.get(f'/api/meet/notes/{notes.pk}').status_code, 404)
 
     @override_settings(ANTHROPIC_API_KEY='sk-test', AI_API_KEY='')
@@ -166,8 +166,8 @@ class MeetRealtimeTests(TransactionTestCase):
     @override_settings(ANTHROPIC_API_KEY='', AI_API_KEY='')
     async def test_full_meeting(self):
         registry.reset()
-        host = await sync_to_async(User.objects.create_user)('host', password='x', display_name='Awa')
-        guest = await sync_to_async(User.objects.create_user)('guest', password='x', display_name='Koffi')
+        host = await sync_to_async(User.objects.create_user)('host', password='x', display_name='Awa', can_connect=True)
+        guest = await sync_to_async(User.objects.create_user)('guest', password='x', display_name='Koffi', can_connect=True)
         meeting = await sync_to_async(Meeting.objects.create)(host=host, title='Réunion test')
         wh, wg = await self.connect(host), await self.connect(guest)
 
@@ -238,7 +238,7 @@ class MeetRealtimeTests(TransactionTestCase):
 
     async def test_disconnect_leaves(self):
         registry.reset()
-        host = await sync_to_async(User.objects.create_user)('host', password='x')
+        host = await sync_to_async(User.objects.create_user)('host', password='x', can_connect=True)
         meeting = await sync_to_async(Meeting.objects.create)(host=host)
         wh = await self.connect(host)
         await wh.send_json_to({'type': 'meet.join', 'code': meeting.code})
@@ -246,3 +246,122 @@ class MeetRealtimeTests(TransactionTestCase):
         self.assertEqual(registry.count(meeting.pk), 1)
         await wh.disconnect()
         self.assertEqual(registry.count(meeting.pk), 0)
+
+    async def drain(self, comm):
+        """Vide les messages déjà reçus (pour vérifier ensuite qu'aucun autre n'arrive)."""
+        while not await comm.receive_nothing(timeout=0.2):
+            await comm.receive_json_from()
+
+    async def test_same_account_appears_once(self):
+        registry.reset()
+        host = await sync_to_async(User.objects.create_user)('host', password='x', can_connect=True)
+        guest = await sync_to_async(User.objects.create_user)('guest', password='x', can_connect=True)
+        meeting = await sync_to_async(Meeting.objects.create)(host=host, access=Meeting.OPEN)
+        tab1, tab2, wg = await self.connect(host), await self.connect(host), await self.connect(guest)
+        await wg.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'g'})
+        await self.recv(wg, 'meet.joined')
+
+        await tab1.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'onglet-1'})
+        first = (await self.recv(tab1, 'meet.joined'))['me']
+        # Second onglet (autre identifiant) : il remplace le premier, prévenu ; l'organisateur reste unique.
+        await tab2.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'onglet-2'})
+        joined = await self.recv(tab2, 'meet.joined')
+        self.assertEqual(len(joined['peers']), 2)
+        await self.recv(tab1, 'meet.replaced')
+        self.assertEqual((await self.recv(wg, 'meet.peer_left'))['peer'], first)
+        self.assertEqual(registry.count(meeting.pk), 2)
+        # Le premier onglet n'est plus dans la réunion : ses actions renvoient un code exploitable.
+        await tab1.send_json_to({'type': 'meet.state', 'meeting_id': meeting.pk, 'mic': False})
+        self.assertEqual((await self.recv(tab1, 'error'))['code'], 'not_in_meeting')
+
+        # Reconnexion du même onglet (même identifiant, nouvelle connexion) : remplacement silencieux.
+        tab3 = await self.connect(host)
+        await self.drain(tab2)
+        await tab3.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'onglet-2'})
+        await self.recv(tab3, 'meet.joined')
+        self.assertTrue(await tab2.receive_nothing(timeout=0.3))
+        self.assertEqual(registry.count(meeting.pk), 2)
+        # La séance continue (pas de nouveau début) et chaque passage est clos.
+        attendances = await sync_to_async(lambda: list(meeting.attendances.filter(user=host).values_list('left_at', flat=True)))()
+        self.assertEqual(len(attendances), 3)
+        self.assertEqual(sum(1 for a in attendances if a is None), 1)
+        for comm in (tab1, tab2, tab3, wg):
+            await comm.disconnect()
+        self.assertEqual(registry.count(meeting.pk), 0)
+
+    async def test_admitted_guest_comes_back_without_waiting(self):
+        registry.reset()
+        host = await sync_to_async(User.objects.create_user)('host', password='x', can_connect=True)
+        guest = await sync_to_async(User.objects.create_user)('guest', password='x', can_connect=True)
+        meeting = await sync_to_async(Meeting.objects.create)(host=host)
+        wh, wg = await self.connect(host), await self.connect(guest)
+        await wh.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'h'})
+        await self.recv(wh, 'meet.joined')
+
+        # Deux demandes du même compte (deux onglets) : une seule ligne dans la salle d'attente.
+        wg2 = await self.connect(guest)
+        await wg.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'g1'})
+        await self.recv(wg, 'meet.waiting')
+        await wg2.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'g2'})
+        await self.recv(wg2, 'meet.waiting')
+        await self.recv(wg, 'meet.replaced')
+        self.assertEqual(len(registry.waiting(meeting.pk)), 1)
+        await wg.disconnect()
+
+        knock = await self.recv(wh, 'meet.waiting_list', lambda d: len(d['waiting']) == 1)
+        await wh.send_json_to({'type': 'meet.admit', 'meeting_id': meeting.pk, 'request_id': knock['waiting'][0]['id']})
+        await self.recv(wg2, 'meet.admitted')
+        await wg2.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'g2'})
+        await self.recv(wg2, 'meet.joined')
+
+        # Coupure réseau : l'invité revient sur une nouvelle connexion et entre sans attendre.
+        await wg2.disconnect()
+        wg3 = await self.connect(guest)
+        await wg3.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'g2'})
+        guest_peer = (await self.recv(wg3, 'meet.joined'))['me']
+
+        # Retiré par l'organisatrice : il doit de nouveau demander.
+        await wh.send_json_to({'type': 'meet.remove', 'meeting_id': meeting.pk, 'peer': guest_peer})
+        await self.recv(wg3, 'meet.removed')
+        await wg3.send_json_to({'type': 'meet.join', 'code': meeting.code, 'client': 'g2'})
+        await self.recv(wg3, 'meet.waiting')
+        await wh.disconnect()
+        await wg3.disconnect()
+
+    async def test_waiting_room_survives_host_absence(self):
+        registry.reset()
+        host = await sync_to_async(User.objects.create_user)('host', password='x', can_connect=True)
+        guest = await sync_to_async(User.objects.create_user)('guest', password='x', can_connect=True)
+        meeting = await sync_to_async(Meeting.objects.create)(host=host)
+        wh, wg = await self.connect(host), await self.connect(guest)
+        await wh.send_json_to({'type': 'meet.join', 'code': meeting.code})
+        await self.recv(wh, 'meet.joined')
+        await wg.send_json_to({'type': 'meet.join', 'code': meeting.code})
+        await self.recv(wg, 'meet.waiting')
+        # L'organisatrice quitte (salle vide) puis revient : la demande est toujours là.
+        await wh.send_json_to({'type': 'meet.leave', 'meeting_id': meeting.pk})
+        await wh.send_json_to({'type': 'meet.join', 'code': meeting.code})
+        self.assertEqual(len((await self.recv(wh, 'meet.joined'))['waiting']), 1)
+        await wh.disconnect()
+        await wg.disconnect()
+
+    async def test_lost_connection_is_swept(self):
+        registry.reset()
+        host = await sync_to_async(User.objects.create_user)('host', password='x', can_connect=True)
+        guest = await sync_to_async(User.objects.create_user)('guest', password='x', can_connect=True)
+        meeting = await sync_to_async(Meeting.objects.create)(host=host, access=Meeting.OPEN)
+        wh, wg = await self.connect(host), await self.connect(guest)
+        await wh.send_json_to({'type': 'meet.join', 'code': meeting.code})
+        await self.recv(wh, 'meet.joined')
+        await wg.send_json_to({'type': 'meet.join', 'code': meeting.code})
+        guest_peer = (await self.recv(wg, 'meet.joined'))['me']
+        # La connexion de l'invité ne donne plus signe de vie (onglet tué, réseau coupé sans fermeture).
+        channel = registry.channel_of(meeting.pk, guest_peer)
+        with registry._lock:
+            registry._rooms[meeting.pk]['peers'][channel]['seen'] -= 1000
+        await wh.send_json_to({'type': 'ping', 't': 1})
+        self.assertEqual((await self.recv(wh, 'meet.peer_left'))['peer'], guest_peer)
+        await self.recv(wg, 'meet.rejoin')
+        self.assertEqual(registry.count(meeting.pk), 1)
+        await wh.disconnect()
+        await wg.disconnect()

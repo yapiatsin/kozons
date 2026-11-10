@@ -2,6 +2,7 @@
 
 Méthodes synchrones exécutées dans un thread (database_sync_to_async), comme pour les lives.
 """
+import logging
 import time
 
 from asgiref.sync import async_to_sync
@@ -14,6 +15,21 @@ from chat.realtime import push
 
 from . import registry, services as svc
 from .models import Meeting, MeetingInvite, MeetingMessage, TranscriptLine
+
+logger = logging.getLogger(__name__)
+
+# Connexion sans signe de vie (ping toutes les 25 s, ralenti à 1/min dans un onglet en arrière-plan)
+# depuis ce délai : considérée comme perdue et retirée de la réunion.
+STALE_AFTER = 150
+SWEEP_EVERY = 30
+
+
+class MeetError(ValueError):
+    """Erreur renvoyée au client avec un code exploitable (ex. « not_in_meeting » -> il rejoint de nouveau)."""
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
 
 REACTIONS = ['💖', '👍', '🎉', '👏', '😂', '😮', '😢', '🤔', '👎']
 SETTINGS_FIELDS = {
@@ -38,6 +54,7 @@ class MeetConsumerMixin:
         self.meet_rooms = set()     # réunions où cette connexion est admise
         self.meet_waiting = set()   # réunions où elle attend d'être admise
         self._meet_last = {}
+        self._meet_name = (None, 0)
 
     # ------------------------------------------------------------ outils
 
@@ -53,9 +70,11 @@ class MeetConsumerMixin:
 
     def _me_in(self, meeting_id, manager=False):
         """Pair de cette connexion dans la réunion (erreur si elle n'y est pas / plus)."""
-        peer = registry.peer(int(meeting_id or 0), self.channel_name)
+        meeting_id = int(meeting_id or 0)
+        peer = registry.peer(meeting_id, self.channel_name)
         if peer is None:
-            raise ValueError("Vous n'êtes pas dans cette réunion.")
+            raise MeetError("Vous n'êtes pas dans cette réunion.", 'not_in_meeting')
+        registry.touch(meeting_id, self.channel_name)
         if manager and not svc.is_manager(peer['role']):
             raise ValueError("Réservé à l'organisateur.")
         return peer
@@ -76,6 +95,32 @@ class MeetConsumerMixin:
         for channel in registry.manager_channels(meeting.pk):
             svc.send_to_channel(channel, 'meet.waiting_list', data)
 
+    def _display_name(self):
+        """Nom affiché (mis en cache 60 s : les sous-titres en envoient plusieurs par seconde)."""
+        name, at = self._meet_name
+        if name is None or time.monotonic() - at > 60:
+            name = User.objects.get(pk=self.user.pk).name
+            self._meet_name = (name, time.monotonic())
+        return name
+
+    def _client_id(self, content):
+        """Identifiant de l'onglet (change à chaque chargement de page) : distingue une reconnexion du
+        même onglet (remplacement silencieux) d'un autre onglet / appareil (prévenu)."""
+        return str(content.get('client') or '')[:40]
+
+    def _evict_other_connections(self, meeting, user, client):
+        """Un compte n'est présent qu'une fois : ses autres connexions (fantômes d'une coupure réseau,
+        autre onglet, autre appareil) quittent la réunion ou la salle d'attente."""
+        admitted, waiting = registry.channels_of_user(meeting.pk, user.pk, exclude=self.channel_name)
+        for channel, peer in admitted.items():
+            if peer.get('client') != client:
+                svc.send_to_channel(channel, 'meet.replaced', {'meeting_id': meeting.pk})
+            self._meet_exit(meeting.pk, channel=channel)
+        for channel in waiting:
+            registry.unwait(meeting.pk, channel)
+            svc.send_to_channel(channel, 'meet.replaced', {'meeting_id': meeting.pk})
+        return admitted, waiting
+
     def _broadcast_peer(self, meeting_id, channel):
         peer = registry.peer(meeting_id, channel)
         if peer:
@@ -90,12 +135,22 @@ class MeetConsumerMixin:
         decision = svc.entry(meeting, user)
         if decision not in ('join', 'ask'):
             raise ValueError(decision)
+        client = self._client_id(content)
         if registry.peer(meeting.pk, self.channel_name):
+            registry.touch(meeting.pk, self.channel_name)
             return self._meet_welcome(meeting, user)
         waiting = registry.waiting(meeting.pk).get(self.channel_name)
-        if decision == 'ask' and not (waiting and waiting.get('approved')):
+        # Déjà admis pendant cette séance (coupure réseau, autre onglet) : pas de nouvelle attente.
+        readmit = registry.was_admitted(meeting.pk, user.pk)
+        if decision == 'ask' and not readmit and not (waiting and waiting.get('approved')):
             if not waiting:
-                registry.wait(meeting.pk, self.channel_name, user.pk)
+                # Une seule demande par compte : celle d'un autre onglet / d'une connexion perdue est remplacée.
+                _, others = self._evict_other_connections(meeting, user, client)
+                # Même place et même identifiant de demande : le bouton « Admettre » de l'organisateur reste valable.
+                previous = min(others.values(), key=lambda w: w['since'], default=None)
+                registry.wait(meeting.pk, self.channel_name, user.pk,
+                              since=previous and previous['since'], request_id=previous and previous['id'],
+                              approved=any(w.get('approved') for w in others.values()))
                 self.meet_waiting.add(meeting.pk)
                 self._notify_managers_waiting(meeting)
                 if not registry.manager_channels(meeting.pk):
@@ -106,18 +161,21 @@ class MeetConsumerMixin:
                     }, ttl=600, urgency='high', only_offline=False)
             return {'type': 'meet.waiting', 'data': {
                 'meeting_id': meeting.pk, 'managers_present': bool(registry.manager_channels(meeting.pk))}}
-        return self._meet_enter(meeting, user, bool(content.get('mic', True)), bool(content.get('cam', True)))
+        return self._meet_enter(meeting, user, bool(content.get('mic', True)), bool(content.get('cam', True)), client)
 
-    def _meet_enter(self, meeting, user, mic, cam):
+    def _meet_enter(self, meeting, user, mic, cam, client=''):
         role = svc.role_of(meeting, user)
         if not svc.is_manager(role):
             mic = mic and meeting.mic_allowed
             cam = cam and meeting.cam_allowed
-        registry.admit(meeting.pk, self.channel_name, user.pk, mic=mic, cam=cam, role=role)
+        new_session = registry.count(meeting.pk) == 0
+        registry.admit(meeting.pk, self.channel_name, user.pk, mic=mic, cam=cam, role=role, client=client)
         self.meet_waiting.discard(meeting.pk)
         self.meet_rooms.add(meeting.pk)
         self._meet_group(meeting.pk)
-        svc.mark_joined(meeting, user)
+        # Admis d'abord (la salle n'est jamais vide), puis ses anciennes connexions sont retirées.
+        self._evict_other_connections(meeting, user, client)
+        svc.mark_joined(meeting, user, new_session=new_session)
         svc.add_notes_recipient(meeting, user.pk)
         self._broadcast_peer(meeting.pk, self.channel_name)
         self._notify_managers_waiting(meeting)
@@ -199,7 +257,40 @@ class MeetConsumerMixin:
 
     def _meet_disconnect(self):
         for meeting_id in list(getattr(self, 'meet_rooms', ())) + list(getattr(self, 'meet_waiting', ())):
-            self._meet_exit(meeting_id)
+            try:
+                self._meet_exit(meeting_id)
+            except Exception:  # une réunion en erreur ne doit pas en laisser d'autres avec un fantôme
+                logger.exception('Meet : départ de la réunion %s', meeting_id)
+
+    def _meet_heartbeat(self):
+        """Ping du client : signe de vie dans ses réunions, et retrait des connexions perdues
+        (onglet fermé brutalement, réseau coupé sans fermeture propre de la WebSocket)."""
+        rooms = set(getattr(self, 'meet_rooms', ())) | set(getattr(self, 'meet_waiting', ()))
+        for meeting_id in rooms:
+            registry.touch(meeting_id, self.channel_name)
+        if not rooms or self._meet_throttle('sweep', SWEEP_EVERY):
+            return
+        for meeting_id in rooms:
+            try:
+                self._meet_sweep(meeting_id)
+            except Exception:
+                logger.exception('Meet : nettoyage de la réunion %s', meeting_id)
+
+    def _meet_sweep(self, meeting_id):
+        peers, waiting = registry.stale(meeting_id, STALE_AFTER)
+        for channel in peers:
+            if channel != self.channel_name:
+                # Si la connexion vit encore (simple lenteur), le client rejoint aussitôt.
+                svc.send_to_channel(channel, 'meet.rejoin', {'meeting_id': meeting_id})
+                self._meet_exit(meeting_id, channel=channel)
+        stale_waiting = [c for c in waiting if c != self.channel_name]
+        for channel in stale_waiting:
+            registry.unwait(meeting_id, channel)
+            svc.send_to_channel(channel, 'meet.rejoin', {'meeting_id': meeting_id})
+        if stale_waiting:
+            meeting = Meeting.objects.filter(pk=meeting_id).first()
+            if meeting:
+                self._notify_managers_waiting(meeting)
 
     # ------------------------------------------------------------ état : micro, caméra, main, écran
 
@@ -274,7 +365,7 @@ class MeetConsumerMixin:
             targets = [c for c, p in registry.peers(meeting.pk).items() if not svc.is_manager(p['role']) and p['mic']]
         else:
             targets = [registry.channel_of(meeting.pk, content.get('peer'))]
-        by = User.objects.get(pk=self.user.pk).name
+        by = self._display_name()
         for channel in filter(None, targets):
             registry.update(meeting.pk, channel, mic=False)
             svc.send_to_channel(channel, 'meet.muted', {'meeting_id': meeting.pk, 'by': by, 'by_peer': me['peer']})
@@ -290,6 +381,8 @@ class MeetConsumerMixin:
             raise ValueError('Participant introuvable.')
         if target['role'] == 'host':
             raise ValueError("L'organisateur ne peut pas être retiré.")
+        # Retiré : il devra de nouveau demander à participer (pas de retour direct).
+        registry.forget_admitted(meeting.pk, target['user_id'])
         svc.send_to_channel(channel, 'meet.removed', {'meeting_id': meeting.pk})
         self._meet_exit(meeting.pk, channel=channel)
         return None
@@ -297,12 +390,16 @@ class MeetConsumerMixin:
     def _meet_end(self, content):
         meeting = self._meeting(content)
         self._me_in(meeting.pk, manager=True)
-        svc.broadcast(meeting.pk, 'meet.ended', {'meeting_id': meeting.pk, 'by': User.objects.get(pk=self.user.pk).name})
-        for channel in list(registry.peers(meeting.pk)) + list(registry.waiting(meeting.pk)):
+        svc.broadcast(meeting.pk, 'meet.ended', {'meeting_id': meeting.pk, 'by': self._display_name()})
+        peers = list(registry.peers(meeting.pk))
+        for channel in peers + list(registry.waiting(meeting.pk)):
             if channel != self.channel_name:
                 svc.send_to_channel(channel, 'meet.ended', {'meeting_id': meeting.pk})
         self.meet_rooms.discard(meeting.pk)
-        svc.close_session(meeting.pk)
+        svc.close_session(meeting.pk, keep_waiting=False)
+        # Plus aucune connexion ne reçoit les événements de cette séance.
+        for channel in peers:
+            self._meet_group(meeting.pk, add=False, channel=channel)
         return None
 
     def _meet_settings(self, content):
@@ -385,14 +482,14 @@ class MeetConsumerMixin:
         if not text:
             return None
         final = bool(content.get('final'))
-        user = User.objects.get(pk=self.user.pk)
+        name = self._display_name()
         svc.broadcast(meeting_id, 'meet.caption', {
-            'meeting_id': meeting_id, 'peer': me['peer'], 'name': user.name, 'text': text, 'final': final,
+            'meeting_id': meeting_id, 'peer': me['peer'], 'name': name, 'text': text, 'final': final,
             'seq': content.get('seq'),
         })
         notes_id = registry.notes(meeting_id)
         if final and notes_id:
-            TranscriptLine.objects.create(notes_id=notes_id, user=user, speaker=user.name[:80], text=text)
+            TranscriptLine.objects.create(notes_id=notes_id, user_id=self.user.pk, speaker=name[:80], text=text)
         return None
 
     def _meet_notes(self, content):

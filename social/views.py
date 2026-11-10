@@ -1,4 +1,5 @@
 import re
+from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Count, Exists, OuterRef, Q
@@ -11,8 +12,9 @@ from accounts.serializers import contact_ids, user_brief
 from chat.realtime import push
 from kozons.api import ApiError, api, as_bool, as_int, body, media_kind, rate_limit
 
+from . import storymedia
 from .models import (CloseFriend, Comment, CommentLike, Follow, Like, Notification, Post, PostMedia,
-                     SavedPost, Story, StoryView)
+                     SavedPost, Story, StoryPreference, StoryReport, StoryView)
 
 PUSH_VERBS = {
     'like': 'a aimé votre publication.', 'comment': 'a commenté :', 'reply': 'a répondu à votre commentaire :',
@@ -132,6 +134,8 @@ def story_data(s, viewer):
         'user_id': s.user_id,
         'kind': s.kind,
         'file': s.file.url if s.file else None,
+        'poster': s.poster.url if s.poster else None,
+        'duration': s.duration,
         'text': s.text,
         'background': s.background,
         'close_friends_only': s.close_friends_only,
@@ -556,7 +560,7 @@ def story_audience_ids(viewer):
 def visible_stories(viewer):
     now = timezone.now()
     close_owner_ids = CloseFriend.objects.filter(friend=viewer).values('owner_id')
-    return (Story.objects.filter(user_id__in=story_audience_ids(viewer), expires_at__gt=now)
+    return (Story.objects.filter(user_id__in=story_audience_ids(viewer), expires_at__gt=now, processing=False)
             .filter(Q(close_friends_only=False) | Q(user=viewer) | Q(user_id__in=close_owner_ids))
             .select_related('user')
             .annotate(seen=Exists(StoryView.objects.filter(story=OuterRef('pk'), user=viewer)),
@@ -568,6 +572,7 @@ def visible_stories(viewer):
 def stories(request):
     if request.method == 'POST':
         return create_story(request)
+    storymedia.maybe_purge()  # ménage des statuts expirés (au plus toutes les 10 min, en arrière-plan)
     groups = {}
     stories_ = list(visible_stories(request.user).order_by('created_at'))
     # Mes stories : la liste des vues est jointe, l'œil l'affiche aussitôt (une seule requête).
@@ -583,17 +588,39 @@ def stories(request):
         g = groups.setdefault(s.user_id, {'user': user_brief(s.user, request.user), 'stories': []})
         g['stories'].append(story_data(s, request.user))
     result = []
+    prefs = {p.author_id: p for p in StoryPreference.objects.filter(user=request.user, author_id__in=groups)}
     for uid, g in groups.items():
         g['all_seen'] = all(s['seen'] for s in g['stories'])
         g['is_me'] = uid == request.user.pk
+        pref = prefs.get(uid)
+        g['muted'] = bool(pref and pref.muted)
+        g['notify'] = bool(pref and pref.notify)
         g['latest'] = g['stories'][-1]['created_at']
         result.append(g)
-    result.sort(key=lambda g: (g['is_me'], not g['all_seen'], g['latest']), reverse=True)
+    result.sort(key=lambda g: (g['is_me'], not g['muted'], not g['all_seen'], g['latest']), reverse=True)
     return {'results': result}
+
+
+@api(['POST'])
+def story_preferences(request, user_id):
+    """Menu « ⋮ » : masquer les statuts d'un auteur, être notifié de ses nouveaux statuts."""
+    author = get_object_or_404(User, pk=user_id, is_active=True)
+    if author.pk == request.user.pk:
+        raise ApiError('Action impossible sur vos propres statuts.')
+    data = body(request)
+    pref, _ = StoryPreference.objects.get_or_create(user=request.user, author=author)
+    for field in ('muted', 'notify'):
+        if field in data:
+            setattr(pref, field, as_bool(data.get(field)))
+    pref.save()
+    return {'muted': pref.muted, 'notify': pref.notify}
 
 
 def create_story(request):
     rate_limit(request, 'story', 50, 3600)
+    # Comme WhatsApp : un nombre limité de statuts par 24 h (stockage et fil de ses contacts).
+    if Story.objects.filter(user=request.user, created_at__gt=timezone.now() - timedelta(hours=24)).count() >= storymedia.daily_limit():
+        raise ApiError(f'Vous avez atteint la limite de {storymedia.daily_limit()} statuts par 24 heures.', 429)
     data = request.POST
     upload = request.FILES.get('file')
     story = Story(user=request.user, close_friends_only=as_bool(data.get('close_friends_only')),
@@ -603,14 +630,34 @@ def create_story(request):
         if kind not in ('image', 'video'):
             raise ApiError('Une story doit être une photo ou une vidéo.')
         story.kind = kind
-        story.file = upload
+        if kind == 'image':
+            story.file = upload
     else:
         if not story.text.strip():
             raise ApiError('Story vide.')
         story.kind = 'text'
+    if story.kind == 'video':
+        # Conversion en arrière-plan (MP4 720p, 90 s max) : le statut est publié une fois prêt.
+        story.processing = True
+        story.save()
+        if storymedia.start_processing(story, upload, trim_start=data.get('trim_start'), trim_end=data.get('trim_end'),
+                                       mute=as_bool(data.get('mute'))):
+            return dict(story_data(story, request.user), processing=True)
+        story.file = upload   # ffmpeg absent (développement) : vidéo publiée telle quelle
+        story.processing = False
     story.save()
     audience = story_audience_viewers(request.user, story)
     push(audience, 'story.new', {'user_id': request.user.pk})
+    # « Recevoir les notifications » : prévenus même application fermée (s'ils peuvent voir ce statut).
+    subscribers = set(StoryPreference.objects.filter(author=request.user, notify=True, muted=False)
+                      .values_list('user_id', flat=True)) & (set(audience) - {request.user.pk})
+    if subscribers:
+        send_to_users(subscribers, {
+            'kind': 'story', 'title': request.user.name,
+            'body': 'a publié un nouveau statut' if story.kind != 'text' else story.text[:120],
+            'icon': request.user.avatar.url if request.user.avatar else None,
+            'url': '/status', 'tag': f'story-{request.user.pk}',
+        }, ttl=TTL_SOCIAL, only_offline=False)
     return story_data(story, request.user)
 
 
@@ -635,13 +682,21 @@ def story_action(request, pk):
     if request.method == 'DELETE':
         if story.user_id != request.user.pk:
             raise ApiError('Accès refusé.', 403)
-        if story.file:
-            story.file.delete(save=False)
+        storymedia.delete_story_files(story)
         story.delete()
         return {'ok': True}
-    action = body(request).get('action', 'view')
+    data = body(request)
+    action = data.get('action', 'view')
     if story.user_id == request.user.pk:
         return {'ok': True}
+    if action == 'report':
+        rate_limit(request, 'story-report', 20, 3600)
+        reason = data.get('reason') if data.get('reason') in dict(StoryReport.REASONS) else 'other'
+        StoryReport.objects.get_or_create(story=story, reporter=request.user, defaults={
+            'author_id': story.user_id, 'reason': reason,
+            'snapshot': {'kind': story.kind, 'text': story.text, 'file': story.file.url if story.file else None},
+        })
+        return {'reported': True}
     view, _ = StoryView.objects.get_or_create(story=story, user=request.user)
     if action == 'like':
         view.liked = not view.liked
@@ -658,8 +713,7 @@ def story_viewers(request, pk):
     return {'results': viewer_rows(story.views.select_related('user').order_by('-viewed_at'), request.user)}
 
 
-# ---------------------------------------------------------------- Notifications
-
+# ---------------------------------------------------------------- Notifications ------------------------------------------------------------- #
 @api(['GET', 'POST'])
 def notifications(request):
     if request.method == 'POST':

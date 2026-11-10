@@ -233,7 +233,7 @@ export function mediaPreviewDialog(files, onSend, { viewOnce = false } = {}) {
   const m = modal(h('div.media-preview', stage, files.length > 1 ? thumbs : null,
     h('div.row.gap.preview-bar', caption,
       files.some(isVisual) ? h('label.once-toggle', { title: 'Vue unique' }, once, icon('once', 20)) : null,
-      h('button.send-btn', { type: 'button', onclick: sendAll, 'aria-label': 'Envoyer' }, icon('send', 22)))),
+      h('button.send-btn', { type: 'button', onclick: sendAll, 'aria-label': 'Envoyer', 'data-keep-focus': '' }, icon('send', 22)))),
   { title: files.length > 1 ? `${files.length} fichiers` : 'Envoyer', wide: true });
 }
 

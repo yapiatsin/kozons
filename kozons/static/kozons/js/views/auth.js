@@ -151,11 +151,13 @@ export function renderAuth(root, onDone, { notice = '', invite = '' } = {}) {
         busy(submit, async () => {
           error.textContent = '';
           try {
-            const { user } = await api.post('auth/register', {
+            const { user, pending, message } = await api.post('auth/register', {
               username: username.value.trim(), email: email.value.trim(),
               display_name: displayName.value.trim(), password: pw.input.value, invite: inviter ? invite : undefined,
             });
             try { localStorage.removeItem('kozons.invite'); } catch (e) { /* ignoré */ }
+            // Compte créé mais pas encore autorisé à se connecter : retour à l'écran de connexion.
+            if (pending) { showLogin(username.value.trim(), message); return; }
             // Venu par une invitation : direction « Retrouver des amis » (l'ami qui invite est déjà ajouté).
             finish(user, inviter ? '/people' : '/settings', true);  // inscription : appareil mémorisé
           } catch (err) { error.textContent = err.message; }
@@ -265,7 +267,8 @@ export function renderAuth(root, onDone, { notice = '', invite = '' } = {}) {
             busy(submit, async () => {
               error.textContent = '';
               try {
-                const { user } = await api.post('auth/password/reset', { reset_token: resetToken, new_password: pw.input.value });
+                const { user, pending, message } = await api.post('auth/password/reset', { reset_token: resetToken, new_password: pw.input.value });
+                if (pending) { showLogin(identifier, message); return; }
                 finish(user, '/');
               } catch (err) { error.textContent = err.message; }
             })();

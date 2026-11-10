@@ -7,7 +7,7 @@
 //    trois pistes fixes (micro, caméra, écran) pour ne jamais renégocier.
 import { api } from '../api.js';
 import { bus, state } from '../store.js';
-import { send } from '../ws.js';
+import { send, TAB_ID } from '../ws.js';
 import { h, clear, icon, btn, avatar, menu, modal, toast, errorToast, confirmDialog, richText, timeHM, debounce, spinner, beep } from '../ui.js';
 
 const isTouch = () => window.matchMedia('(pointer: coarse)').matches;
@@ -295,7 +295,7 @@ export function startRoom(root, joined, local, { onExit }) {
       }
       if (!isNew && !prev.hand && data.hand && isManager()) notice(`✋ ${nameOf(peer)} lève la main`);
     }
-    if (prev.screen !== data.screen || isNew) layout();
+    if (prev.screen !== data.screen || isNew) scheduleLayout();
     refreshPeople();
     return peer;
   }
@@ -310,7 +310,7 @@ export function startRoom(root, joined, local, { onExit }) {
     ctx.captions.delete(peerId);
     if (ctx.pinned === peerId) ctx.pinned = null;
     stopMeter(peerId);
-    layout();
+    scheduleLayout();
     refreshPeople();
   }
 
@@ -319,6 +319,19 @@ export function startRoom(root, joined, local, { onExit }) {
     if (ctx.screen) return { peerId: ctx.me, kind: 'scr' };
     for (const p of ctx.peers.values()) if (p.data.screen && p.data.peer !== ctx.me && p.streams.scr) return { peerId: p.data.peer, kind: 'scr' };
     return null;
+  }
+
+  // Plusieurs changements dans la même tâche (arrivée de N participants, pistes reçues) : un seul
+  // recalcul de la disposition, et débits vidéo réajustés quand le nombre de participants change.
+  let layoutQueued = false, lastCount = 0;
+  function scheduleLayout() {
+    if (layoutQueued) return;
+    layoutQueued = true;
+    queueMicrotask(() => {
+      layoutQueued = false;
+      layout();
+      if (ctx.peers.size !== lastCount) { lastCount = ctx.peers.size; rebalanceBitrates(); }
+    });
   }
 
   let screenView = null;
@@ -490,7 +503,7 @@ export function startRoom(root, joined, local, { onExit }) {
       stream.addTrack(e.track);
       peer.streams[kind] = stream;
       if (kind === 'cam') { paintTile(peer.data.peer); if (e.track.kind === 'audio') meter(peer.data.peer, stream); }
-      else layout();
+      else scheduleLayout();
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed' && peer.whep[kind] === pc) setTimeout(() => subscribe(peer, kind), 2000);
@@ -504,7 +517,7 @@ export function startRoom(root, joined, local, { onExit }) {
 
   function dropSubscription(peer, kind) {
     if (peer.whep[kind]) { peer.whep[kind].close(); peer.whep[kind] = null; }
-    if (kind === 'scr' && peer.streams.scr) { peer.streams.scr = null; layout(); }
+    if (kind === 'scr' && peer.streams.scr) { peer.streams.scr = null; scheduleLayout(); }
   }
 
   // ---------------------------------------------------------- transport : pair-à-pair (p2p)
@@ -519,8 +532,8 @@ export function startRoom(root, joined, local, { onExit }) {
       if (!peer.streams[kind]) peer.streams[kind] = new MediaStream();
       peer.streams[kind].addTrack(e.track);
       if (kind === 'cam') { paintTile(peer.data.peer); if (e.track.kind === 'audio') meter(peer.data.peer, peer.streams.cam); }
-      e.track.onunmute = () => { if (kind === 'scr') layout(); };
-      layout();
+      e.track.onunmute = () => { if (kind === 'scr') scheduleLayout(); };
+      scheduleLayout();
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed' && peer.pc === pc && ctx.me < peer.data.peer) {
@@ -537,8 +550,19 @@ export function startRoom(root, joined, local, { onExit }) {
     tr[0].sender.replaceTrack(local.audio || null).catch(() => {});
     tr[1].sender.replaceTrack(local.video || null).catch(() => {});
     tr[2].sender.replaceTrack(ctx.screen ? ctx.screen.getVideoTracks()[0] : null).catch(() => {});
+    capBitrate(tr[1].sender, p2pBitrate());
+  }
+
+  // Pair-à-pair : ma caméra est envoyée à chacun ; plus il y a de monde, plus le débit par flux baisse
+  // (sinon la connexion montante sature et tout le monde décroche).
+  function p2pBitrate() {
     const n = Math.max(1, ctx.peers.size - 1);
-    capBitrate(tr[1].sender, n > 4 ? 300_000 : n > 2 ? 600_000 : 1_200_000);
+    return n > 6 ? 200_000 : n > 4 ? 300_000 : n > 2 ? 600_000 : 1_200_000;
+  }
+  function rebalanceBitrates() {
+    if (ctx.media.mode !== 'p2p') return;
+    const bps = p2pBitrate();
+    ctx.peers.forEach(p => { const tr = p.pc && p.pc.getTransceivers(); if (tr && tr.length >= 3) capBitrate(tr[1].sender, bps); });
   }
 
   async function offer(peer) {
@@ -917,7 +941,7 @@ export function startRoom(root, joined, local, { onExit }) {
     return panelShell('Messages dans l’appel',
       manager ? h('label.mt-switch', h('input', { type: 'checkbox', checked: ctx.settings.chat_enabled, onchange: e => send('meet.settings', { meeting_id: ctx.meeting.id, chat_enabled: e.target.checked }) }), h('span', 'Autoriser tout le monde à envoyer des messages')) : null,
       list,
-      h('div.mt-chat-compose', input, h('button.mt-send', { type: 'button', 'aria-label': 'Envoyer', disabled: !allowed, onclick: sendMsg }, icon('send', 20))));
+      h('div.mt-chat-compose', input, h('button.mt-send', { type: 'button', 'aria-label': 'Envoyer', 'data-keep-focus': '', disabled: !allowed, onclick: sendMsg }, icon('send', 20))));
   }
 
   function chatItem(m) {
@@ -1107,12 +1131,29 @@ export function startRoom(root, joined, local, { onExit }) {
       if (ctx.panel !== 'activities') openPanel('activities');
     })),
     bus.on('meet.removed', mine(() => exit('removed', false))),
+    // Le même compte a rejoint depuis un autre onglet ou appareil : celui-ci quitte la réunion.
+    bus.on('meet.replaced', mine(() => exit('replaced', false))),
+    // Le serveur nous a crus déconnectés (connexion muette trop longtemps) : on revient aussitôt.
+    bus.on('meet.rejoin', mine(() => rejoin())),
     bus.on('meet.ended', mine(() => exit('ended', false))),
     bus.on('meet.joined', data => { if (data.meeting.id === ctx.meeting.id && !ctx.closed) resync(data); }),
-    bus.on('error', e => { if (e && e.for && e.for.startsWith('meet.') && !ctx.closed) notice(e.message); }),
+    bus.on('error', e => {
+      if (!e || !e.for || !e.for.startsWith('meet.') || ctx.closed) return;
+      // Plus dans la réunion côté serveur (coupure) : on rejoint, sans message d'erreur. Léger délai :
+      // si un autre onglet nous a remplacés, « meet.replaced » arrive entre-temps et on ne revient pas.
+      if (e.code === 'not_in_meeting') { setTimeout(rejoin, 1500); return; }
+      notice(e.message);
+    }),
     // Connexion temps réel rétablie : le serveur nous a perdus, on rejoint à nouveau.
-    bus.on('ws:reconnected', () => { if (!ctx.closed) send('meet.join', { code: ctx.meeting.code, mic: local.mic, cam: local.cam }); }),
+    bus.on('ws:reconnected', () => rejoin()),
   );
+
+  let lastRejoin = 0;
+  function rejoin() {
+    if (ctx.closed || Date.now() - lastRejoin < 1000) return;
+    lastRejoin = Date.now();
+    send('meet.join', { code: ctx.meeting.code, mic: local.mic, cam: local.cam, client: TAB_ID });
+  }
 
   // Retour après une coupure : nouvel identifiant, on reconstruit toutes les connexions vidéo.
   function resync(data) {

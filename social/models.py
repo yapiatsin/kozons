@@ -101,6 +101,10 @@ class Story(models.Model):
     close_friends_only = models.BooleanField(default=False)
     created_at = models.DateTimeField(default=timezone.now)
     expires_at = models.DateTimeField(default=story_expiry, db_index=True)
+    # Vidéos : conversion en arrière-plan (MP4 H.264 720p, 90 s max) ; invisible tant qu'elle n'est pas finie.
+    processing = models.BooleanField(default=False, db_index=True)
+    poster = models.FileField(upload_to=story_path, blank=True)   # première image (JPEG), affichée pendant le chargement
+    duration = models.FloatField(null=True, blank=True)           # secondes (vidéos)
 
 
 class StoryView(models.Model):
@@ -111,6 +115,38 @@ class StoryView(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['story', 'user'], name='uniq_story_view')]
+
+
+class StoryPreference(models.Model):
+    """Réglages d'un utilisateur pour les statuts d'un auteur (menu « ⋮ » de la visionneuse)."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='story_preferences')
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    muted = models.BooleanField(default=False)    # « Masquer » : rangés dans « Statuts masqués »
+    notify = models.BooleanField(default=False)   # « Recevoir les notifications » à chaque nouveau statut
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user', 'author'], name='uniq_story_preference')]
+        verbose_name = 'Préférence de statuts'
+        verbose_name_plural = 'Préférences de statuts'
+
+
+class StoryReport(models.Model):
+    """Statut signalé à la modération."""
+    REASONS = [('spam', 'Spam'), ('inappropriate', 'Contenu inapproprié'), ('harassment', 'Harcèlement'),
+               ('false', 'Fausse information'), ('other', 'Autre')]
+    story = models.ForeignKey(Story, null=True, on_delete=models.SET_NULL, related_name='reports')
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='+')
+    reason = models.CharField(max_length=20, choices=REASONS, default='other')
+    # Copie du contenu : le statut expire après 24 h, la modération doit pouvoir le consulter.
+    snapshot = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    handled = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Signalement de statut'
+        verbose_name_plural = 'Signalements de statuts'
 
 
 class HiddenSuggestion(models.Model):

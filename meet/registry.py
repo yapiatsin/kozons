@@ -1,7 +1,9 @@
 """Qui est dans quelle réunion, en temps réel (en mémoire, un seul processus Daphne, comme les lives).
 
-Chaque connexion WebSocket admise reçoit un identifiant court (`peer`) : un même compte connecté
-sur deux appareils apparaît deux fois, comme dans Google Meet.
+Chaque connexion WebSocket admise reçoit un identifiant court (`peer`). Un compte n'est présent
+qu'une fois par réunion : en rejoignant depuis un autre onglet / appareil (ou après une reconnexion),
+l'ancienne connexion est remplacée (voir meet.consumer). `seen` = dernier signe de vie de la connexion
+(ping toutes les 25 s) : une connexion muette depuis trop longtemps est retirée (voir `stale`).
 """
 import secrets
 import threading
@@ -13,14 +15,14 @@ _rooms = {}
 
 
 def _room(meeting_id):
-    return _rooms.setdefault(meeting_id, {'peers': {}, 'waiting': {}, 'notes': None, 'captions': set()})
+    return _rooms.setdefault(meeting_id, {'peers': {}, 'waiting': {}, 'notes': None, 'captions': set(), 'admitted': set()})
 
 
 def new_peer_id():
     return secrets.token_hex(4)
 
 
-def admit(meeting_id, channel, user_id, *, mic=True, cam=True, role='guest'):
+def admit(meeting_id, channel, user_id, *, mic=True, cam=True, role='guest', client=''):
     with _lock:
         room = _room(meeting_id)
         room['waiting'].pop(channel, None)
@@ -29,9 +31,10 @@ def admit(meeting_id, channel, user_id, *, mic=True, cam=True, role='guest'):
             return dict(existing), False
         peer = {
             'peer': new_peer_id(), 'user_id': user_id, 'role': role, 'mic': bool(mic), 'cam': bool(cam),
-            'hand': None, 'screen': False, 'joined_at': time.time(),
+            'hand': None, 'screen': False, 'joined_at': time.time(), 'seen': time.monotonic(), 'client': client,
         }
         room['peers'][channel] = peer
+        room['admitted'].add(user_id)
         return dict(peer), True
 
 
@@ -78,6 +81,45 @@ def channel_of(meeting_id, peer_id):
     return None
 
 
+def was_admitted(meeting_id, user_id):
+    """Ce compte a déjà été admis pendant la séance en cours (il revient après une coupure)."""
+    with _lock:
+        return user_id in _rooms.get(meeting_id, {}).get('admitted', ())
+
+
+def forget_admitted(meeting_id, user_id):
+    with _lock:
+        _rooms.get(meeting_id, {}).get('admitted', set()).discard(user_id)
+
+
+def channels_of_user(meeting_id, user_id, *, exclude=None):
+    """Connexions (admises, en attente) de ce compte dans la réunion, hors `exclude`."""
+    with _lock:
+        room = _rooms.get(meeting_id, {})
+        admitted = {c: dict(p) for c, p in room.get('peers', {}).items() if p['user_id'] == user_id and c != exclude}
+        waiting_ = {c: dict(w) for c, w in room.get('waiting', {}).items() if w['user_id'] == user_id and c != exclude}
+        return admitted, waiting_
+
+
+def touch(meeting_id, channel):
+    """Signe de vie de cette connexion (admise ou en attente)."""
+    with _lock:
+        room = _rooms.get(meeting_id)
+        if room:
+            entry = room['peers'].get(channel) or room['waiting'].get(channel)
+            if entry:
+                entry['seen'] = time.monotonic()
+
+
+def stale(meeting_id, max_age):
+    """Connexions sans signe de vie depuis `max_age` secondes : (admises, en attente)."""
+    limit = time.monotonic() - max_age
+    with _lock:
+        room = _rooms.get(meeting_id, {})
+        return ([c for c, p in room.get('peers', {}).items() if p.get('seen', 0) < limit],
+                [c for c, w in room.get('waiting', {}).items() if w.get('seen', 0) < limit])
+
+
 def user_ids(meeting_id):
     with _lock:
         return list(dict.fromkeys(p['user_id'] for p in _rooms.get(meeting_id, {}).get('peers', {}).values()))
@@ -101,9 +143,12 @@ def manager_channels(meeting_id):
 
 # ---------------------------------------------------------------- salle d'attente
 
-def wait(meeting_id, channel, user_id):
+def wait(meeting_id, channel, user_id, *, since=None, approved=False, request_id=None):
     with _lock:
-        _room(meeting_id)['waiting'][channel] = {'user_id': user_id, 'since': time.time(), 'id': new_peer_id()}
+        _room(meeting_id)['waiting'][channel] = {
+            'user_id': user_id, 'since': since or time.time(), 'id': request_id or new_peer_id(), 'seen': time.monotonic(),
+            'approved': approved,
+        }
         return dict(_rooms[meeting_id]['waiting'][channel])
 
 
@@ -167,8 +212,14 @@ def captions_wanted(meeting_id):
         return bool(_rooms.get(meeting_id, {}).get('captions'))
 
 
-def forget(meeting_id):
+def forget(meeting_id, *, keep_waiting=False):
+    """Fin de séance. `keep_waiting` : les personnes en salle d'attente y restent (l'organisateur
+    peut revenir les admettre) ; sinon la salle est entièrement oubliée."""
     with _lock:
+        room = _rooms.get(meeting_id)
+        if room and keep_waiting and room['waiting']:
+            room.update(peers={}, notes=None, captions=set(), admitted=set())
+            return room
         return _rooms.pop(meeting_id, None)
 
 

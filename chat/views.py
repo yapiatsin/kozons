@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 from django.db import transaction
 from django.db.models import Q
@@ -216,11 +216,25 @@ def messages(request, pk):
         after = as_int(request.GET.get('after'))
         around = as_int(request.GET.get('around'))
         limit = min(as_int(request.GET.get('limit'), 50), 100)
+        target = None
+        if request.GET.get('date') and not around:
+            # Recherche par date : premier message de ce jour (ou après), sinon le plus récent.
+            try:
+                day = date.fromisoformat(request.GET['date'])
+            except ValueError:
+                raise ApiError('Date invalide.')
+            start = timezone.make_aware(datetime.combine(day, datetime.min.time()))
+            around = (qs.filter(created_at__gte=start).order_by('id').values_list('id', flat=True).first()
+                      or qs.order_by('-id').values_list('id', flat=True).first())
+            if not around:
+                return {'results': [], 'has_more': False, 'has_newer': False, 'target': None}
+            target = around
         if around:
             older = list(svc.load_messages(qs.filter(id__lte=around).order_by('-id'))[:limit // 2])
             newer = list(svc.load_messages(qs.filter(id__gt=around).order_by('id'))[:limit // 2])
             items = list(reversed(older)) + newer
-            return {'results': svc.serialize_messages(items, request.user), 'has_more': True, 'has_newer': len(newer) == limit // 2}
+            return {'results': svc.serialize_messages(items, request.user), 'has_more': True,
+                    'has_newer': len(newer) == limit // 2, 'target': target}
         if after:
             items = list(svc.load_messages(qs.filter(id__gt=after).order_by('id'))[:limit])
             return {'results': svc.serialize_messages(items, request.user), 'has_more': False, 'has_newer': len(items) == limit}

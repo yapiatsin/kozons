@@ -221,7 +221,7 @@ function body(msg, ctx) {
           h('div.muted.small', msg.sender_id === state.me.id ? 'Vous avez répondu à sa story' : 'A répondu à votre story'),
           s && !s.expired ? (s.kind === 'text'
             ? h('div.story-quote-text', { style: { background: s.background } }, s.text)
-            : s.kind === 'video' ? h('video', { src: s.file, muted: true }) : h('img', { src: s.file, alt: '' }))
+            : s.kind === 'video' ? (s.poster ? h('img', { src: s.poster, alt: '' }) : h('video', { src: s.file, muted: true, preload: 'metadata' })) : h('img', { src: s.file, alt: '' }))
             : h('div.muted.small', 'Story expirée')),
         msg.text ? h('div.text', richText(msg.text)) : null);
     }

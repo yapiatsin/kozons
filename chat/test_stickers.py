@@ -40,9 +40,9 @@ class StickerTests(TestCase):
 
     def setUp(self):
         cache.clear()
-        self.alice = User.objects.create_user('alice', password='x')
-        self.bob = User.objects.create_user('bob', password='x')
-        self.carol = User.objects.create_user('carol', password='x')
+        self.alice = User.objects.create_user('alice', password='x', can_connect=True)
+        self.bob = User.objects.create_user('bob', password='x', can_connect=True)
+        self.carol = User.objects.create_user('carol', password='x', can_connect=True)
         self.ca, self.cb, self.cc = Client(), Client(), Client()
         self.ca.force_login(self.alice); self.cb.force_login(self.bob); self.cc.force_login(self.carol)
         self.conv = jpost(self.ca, 'conversations/direct', {'user_id': self.bob.pk}).json()['id']

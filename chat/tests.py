@@ -15,7 +15,7 @@ MEDIA = tempfile.mkdtemp()
 
 
 def make_user(username, **kw):
-    u = User.objects.create_user(username=username, password='secret123', **kw)
+    u = User.objects.create_user(username=username, password='secret123', **kw, can_connect=True)
     c = Client()
     c.force_login(u)
     return u, c
@@ -48,6 +48,11 @@ class ChatApiTests(TransactionTestCase):
     def test_auth_flow(self):
         c = Client()
         r = post(c, 'auth/register', {'username': 'dave', 'password': 'Motdepasse1', 'email': 'dave@example.com'})
+        self.assertEqual(r.status_code, 200)
+        # Nouveau compte : en attente d'autorisation (can_connect=False), pas de session ouverte.
+        self.assertIsNone(c.get('/api/me').json()['user'])
+        User.objects.filter(username='dave').update(can_connect=True)
+        r = post(c, 'auth/login', {'username': 'dave', 'password': 'Motdepasse1'})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(c.get('/api/me').json()['user']['username'], 'dave')
         r = post(Client(), 'auth/register', {'username': 'dave', 'password': 'Motdepasse1', 'email': 'dave@example.com'})
@@ -195,6 +200,21 @@ class ChatApiTests(TransactionTestCase):
         hits = self.cc.get('/api/messages/search?q=réunion').json()['results']
         self.assertEqual(len(hits), 1)  # Carol ne voit pas la discussion Alice-Bob
 
+    def test_jump_to_date(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        cid = self.direct()
+        old = post(self.ca, f'conversations/{cid}/messages', {'text': 'il y a une semaine'}).json()['id']
+        Message.objects.filter(pk=old).update(created_at=timezone.now() - timedelta(days=7))
+        recent = post(self.ca, f'conversations/{cid}/messages', {'text': "aujourd'hui"}).json()['id']
+        day = (timezone.now() - timedelta(days=8)).date().isoformat()
+        res = self.cb.get(f'/api/conversations/{cid}/messages?date={day}').json()
+        self.assertEqual(res['target'], old)  # premier message à partir de cette date
+        self.assertIn(recent, [m['id'] for m in res['results']])
+        future = (timezone.now() + timedelta(days=3)).date().isoformat()
+        self.assertEqual(self.cb.get(f'/api/conversations/{cid}/messages?date={future}').json()['target'], recent)
+        self.assertEqual(self.cb.get(f'/api/conversations/{cid}/messages?date=pas-une-date').status_code, 400)
+
     def test_disappearing(self):
         cid = self.direct()
         post(self.ca, f'conversations/{cid}/update', {'disappearing_seconds': 86400})
@@ -207,8 +227,8 @@ class ChatApiTests(TransactionTestCase):
 
 class ConsumerTests(TransactionTestCase):
     async def test_realtime_message_typing_and_call(self):
-        alice = await sync_to_async(User.objects.create_user)('alice', password='secret123')
-        bob = await sync_to_async(User.objects.create_user)('bob', password='secret123')
+        alice = await sync_to_async(User.objects.create_user)('alice', password='secret123', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='secret123', can_connect=True)
 
         # On attache l'utilisateur au scope directement (sans cookie de session).
         from chat.consumers import KozonsConsumer
@@ -284,8 +304,8 @@ class CallResilienceTests(TransactionTestCase):
     async def ongoing_call(self):
         from accounts import presence
         presence.reset()
-        alice = await sync_to_async(User.objects.create_user)('alice', password='x')
-        bob = await sync_to_async(User.objects.create_user)('bob', password='x')
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
         wa, wb = await self.connect(alice), await self.connect(bob)
         await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
         call_id = (await self.recv(wb, 'call.incoming'))['call']['id']
@@ -327,9 +347,9 @@ class CallResilienceTests(TransactionTestCase):
     async def test_ghost_call_does_not_make_callee_busy(self):
         from chat.models import Call
         from django.utils import timezone
-        alice = await sync_to_async(User.objects.create_user)('alice', password='x')
-        bob = await sync_to_async(User.objects.create_user)('bob', password='x')
-        carol = await sync_to_async(User.objects.create_user)('carol', password='x')
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
+        carol = await sync_to_async(User.objects.create_user)('carol', password='x', can_connect=True)
         # Ancien appel resté « en cours » (serveur redémarré pendant l'appel, par exemple).
         ghost = await sync_to_async(Call.objects.create)(caller=carol, callee=bob, status='ongoing', answered_at=timezone.now())
         from accounts import presence
@@ -338,6 +358,68 @@ class CallResilienceTests(TransactionTestCase):
         await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
         self.assertIn('call', await self.recv(wb, 'call.incoming'))
         self.assertEqual(await self.status(ghost.pk), 'ended')
+        await wa.disconnect()
+        await wb.disconnect()
+
+    async def two_users(self):
+        from accounts import presence
+        presence.reset()
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
+        return alice, bob
+
+    @override_settings(CALL_RING_TIMEOUT=0.3)
+    async def test_unanswered_call_becomes_missed_on_server(self):
+        import asyncio
+        alice, bob = await self.two_users()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'ref': 'r1'})
+        created = await self.recv(wa, 'call.created')
+        self.assertEqual(created['ref'], 'r1')
+        call_id = created['call']['id']
+        await self.recv(wb, 'call.incoming')
+        # Personne ne décroche et le client de l'appelante ne raccroche pas : le serveur conclut.
+        await asyncio.sleep(0.6)
+        self.assertEqual(await self.status(call_id), 'missed')
+        self.assertEqual((await self.recv(wb, 'call.ended'))['reason'], 'missed')
+        await wa.disconnect()
+        await wb.disconnect()
+
+    async def test_new_device_rings_without_duplicating_on_others(self):
+        alice, bob = await self.two_users()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
+        call_id = (await self.recv(wb, 'call.incoming'))['call']['id']
+        # Bob ouvre l'application sur un second appareil (depuis la notification) : il sonne aussi…
+        wb2 = await self.connect(bob)
+        self.assertEqual((await self.recv(wb2, 'call.incoming'))['call']['id'], call_id)
+        # … sans renvoyer l'appel au premier appareil (qui l'aurait pris pour un second appel).
+        self.assertTrue(await wb.receive_nothing(timeout=0.3))
+        await wb2.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        await self.recv(wa, 'call.accepted')
+        self.assertEqual(await self.status(call_id), 'ongoing')
+        # Décroché trop tard ailleurs : refus explicite, l'appel reste à l'appareil qui a répondu.
+        await wb.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        self.assertIn("n'est plus disponible", (await self.recv(wb, 'error'))['message'])
+        for comm in (wa, wb, wb2):
+            await comm.disconnect()
+
+    async def test_calling_again_replaces_the_previous_ring(self):
+        alice, bob = await self.two_users()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'ref': 'a'})
+        first = (await self.recv(wa, 'call.created'))['call']['id']
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'ref': 'b'})
+        second = await self.recv(wa, 'call.created')
+        self.assertEqual(second['ref'], 'b')
+        self.assertEqual(await self.status(first), 'missed')
+        self.assertEqual(await self.status(second['call']['id']), 'ringing')
+        # Bob déjà en communication : son application répond « occupé », pas « refusé ».
+        await wb.send_json_to({'type': 'call.decline', 'call_id': second['call']['id'], 'busy': True})
+        ended = await self.recv(wa, 'call.ended')
+        while ended['call']['id'] != second['call']['id']:
+            ended = await self.recv(wa, 'call.ended')
+        self.assertEqual(ended['reason'], 'busy')
         await wa.disconnect()
         await wb.disconnect()
 

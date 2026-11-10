@@ -131,5 +131,6 @@ urlpatterns = [
     path('stories', social.stories),
     path('stories/<int:pk>', social.story_action),
     path('stories/<int:pk>/viewers', social.story_viewers),
+    path('stories/prefs/<int:user_id>', social.story_preferences),
     path('notifications', social.notifications),
 ]

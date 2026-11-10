@@ -39,7 +39,7 @@ class PasswordRulesTests(TestCase):
         self.assertEqual(r.status_code, 400)
 
     def test_login_with_email(self):
-        User.objects.create_user('lina', email='lina@example.com', password='Kozons2026')
+        User.objects.create_user('lina', email='lina@example.com', password='Kozons2026', can_connect=True)
         r = jpost(Client(), 'auth/login', {'username': 'Lina@Example.com', 'password': 'Kozons2026'})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()['user']['username'], 'lina')
@@ -49,7 +49,7 @@ class PasswordRulesTests(TestCase):
 class ForgotPasswordTests(TestCase):
     def setUp(self):
         cache.clear()  # compteurs de limitation de débit
-        self.user = User.objects.create_user('alice', email='alice@example.com', password='Ancien2026', display_name='Alice')
+        self.user = User.objects.create_user('alice', email='alice@example.com', password='Ancien2026', display_name='Alice', can_connect=True)
         self.client = Client()
 
     def request_code(self, identifier='alice@example.com'):
@@ -142,7 +142,7 @@ class ForgotPasswordTests(TestCase):
         self.assertIn('cid:kozons_logo', mail.outbox[0].alternatives[0].content)
 
     def test_invalid_email_is_skipped(self):
-        User.objects.create_user('sansmail', email='admin', password='Ancien2026')
+        User.objects.create_user('sansmail', email='admin', password='Ancien2026', can_connect=True)
         self.request_code('sansmail')
         self.assertEqual(len(mail.outbox), 0)
         self.assertFalse(OneTimeCode.objects.filter(user__username='sansmail').exists())
@@ -164,7 +164,7 @@ class LoginTests(TestCase):
 
     def setUp(self):
         cache.clear()  # compteurs de limitation de débit
-        self.user = User.objects.create_user('alice', email='alice@example.com', password='Kozons2026')
+        self.user = User.objects.create_user('alice', email='alice@example.com', password='Kozons2026', can_connect=True)
         self.client = Client()
 
     def login(self, password='Kozons2026', remember=None):
@@ -205,3 +205,40 @@ class LoginTests(TestCase):
         session['kz_last_active'] = timezone.now().timestamp() - 10 * 3600
         session.save()
         self.assertEqual(self.client.get('/api/conversations').status_code, 200)  # toujours connecté
+
+
+@override_settings(MAILERS=LOCMEM, KOZONS_EMAIL_ASYNC=False)
+class CanConnectTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_new_accounts_cannot_connect_by_default(self):
+        u = User.objects.create_user('nora', email='nora@example.com', password='Kozons2026')
+        self.assertFalse(u.can_connect)
+        r = jpost(Client(), 'auth/login', {'username': 'nora', 'password': 'Kozons2026'})
+        self.assertEqual(r.status_code, 403)
+        self.assertIn('pas encore autorisé', r.json()['error'])
+        # Mauvais mot de passe : message générique, l'état du compte n'est pas révélé.
+        r = jpost(Client(), 'auth/login', {'username': 'nora', 'password': 'Mauvais2026'})
+        self.assertEqual(r.status_code, 401)
+
+    def test_superuser_can_connect(self):
+        admin = User.objects.create_superuser('root', 'root@example.com', 'Kozons2026')
+        self.assertTrue(admin.can_connect)
+        r = jpost(Client(), 'auth/login', {'username': 'root', 'password': 'Kozons2026'})
+        self.assertEqual(r.status_code, 200)
+
+    def test_register_does_not_open_session(self):
+        c = Client()
+        r = jpost(c, 'auth/register', {'username': 'neo', 'email': 'neo@example.com', 'password': 'Kozons2026'})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()['pending'])
+        self.assertIsNone(c.get('/api/me').json()['user'])
+
+    def test_revoking_access_closes_open_sessions(self):
+        u = User.objects.create_user('lea', password='Kozons2026', can_connect=True)
+        c = Client()
+        self.assertEqual(jpost(c, 'auth/login', {'username': 'lea', 'password': 'Kozons2026'}).status_code, 200)
+        self.assertEqual(c.get('/api/me').json()['user']['username'], 'lea')
+        User.objects.filter(pk=u.pk).update(can_connect=False)
+        self.assertIsNone(c.get('/api/me').json()['user'])

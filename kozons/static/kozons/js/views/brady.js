@@ -27,7 +27,7 @@ export function render(stage, params) {
   const scroller = h('div.by-scroll', feed);
   const input = h('textarea.by-input', { rows: 1, placeholder: 'Écris à Brady…', maxlength: 8000, 'aria-label': 'Message pour Brady' });
   const resize = autoGrow(input, 180);
-  const sendBtn = h('button.by-send', { type: 'button', 'aria-label': 'Envoyer' }, icon('send', 20));
+  const sendBtn = h('button.by-send', { type: 'button', 'aria-label': 'Envoyer', 'data-keep-focus': '' }, icon('send', 20));
   const header = h('header.by-head',
     btn('back', 'Retour', () => history.length > 1 ? history.back() : go('/'), 'by-back'),
     h('img.by-logo', { src: BRADY_LOGO, alt: '' }),

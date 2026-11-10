@@ -6,8 +6,8 @@ from django.utils.text import Truncator
 
 from accounts.admin import thumb
 
-from .models import (CloseFriend, Comment, CommentLike, Follow, Like, Notification, Post, PostMedia, SavedPost,
-                     Story, StoryView)
+from .models import (CloseFriend, Comment, CommentLike, Follow, Like, Notification, Post, PostMedia,
+                     SavedPost, Story, StoryReport, StoryView)
 
 
 # ---------------------------------------------------------------- Abonnements
@@ -260,3 +260,15 @@ class NotificationAdmin(admin.ModelAdmin):
     @admin.action(description='Marquer comme lues')
     def mark_read(self, request, queryset):
         self.message_user(request, f'{queryset.update(read=True)} notification(s) marquée(s) comme lue(s).')
+
+
+@admin.register(StoryReport)
+class StoryReportAdmin(admin.ModelAdmin):
+    """Statuts signalés : le contenu est copié (le statut lui-même expire après 24 h)."""
+    list_display = ('id', 'author', 'reporter', 'reason', 'created_at', 'handled')
+    list_filter = ('handled', 'reason', 'created_at')
+    list_editable = ('handled',)
+    search_fields = ('author__username', 'reporter__username')
+    list_select_related = ('author', 'reporter')
+    readonly_fields = ('story', 'author', 'reporter', 'reason', 'snapshot', 'created_at')
+    date_hierarchy = 'created_at'

@@ -16,9 +16,9 @@ def thumb(url, size=36, round_=True):
 @admin.register(User)
 class KozonsUserAdmin(UserAdmin):
     list_display = ('avatar_thumb', 'username', 'display_name', 'email', 'phone', 'is_online', 'last_seen',
-                    'is_private', 'is_active', 'is_staff', 'date_joined')
+                    'is_private', 'can_connect', 'is_active', 'is_staff', 'date_joined')
     list_display_links = ('avatar_thumb', 'username')
-    list_filter = ('is_active', 'is_staff', 'is_superuser', 'is_private', 'read_receipts',
+    list_filter = ('can_connect', 'is_active', 'is_staff', 'is_superuser', 'is_private', 'read_receipts',
                    'last_seen_visibility', 'avatar_visibility', 'date_joined')
     search_fields = ('username', 'display_name', 'email', 'phone', 'first_name', 'last_name')
     ordering = ('-date_joined',)
@@ -29,12 +29,24 @@ class KozonsUserAdmin(UserAdmin):
         ('Profil', {'fields': ('display_name', 'email', 'phone', 'avatar', 'avatar_preview', 'about', 'bio', 'website')}),
         ('Confidentialité', {'fields': ('is_private', 'last_seen_visibility', 'avatar_visibility', 'read_receipts')}),
         ('Présence', {'fields': ('last_seen',)}),
+        ('Accès', {'fields': ('can_connect',)}),
         ('Permissions', {'classes': ('collapse',), 'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Dates', {'fields': ('last_login', 'date_joined')}),
     )
     add_fieldsets = (
-        (None, {'classes': ('wide',), 'fields': ('username', 'email', 'display_name', 'password1', 'password2')}),
+        (None, {'classes': ('wide',), 'fields': ('username', 'email', 'display_name', 'password1', 'password2', 'can_connect')}),
     )
+    actions = ('allow_connect', 'deny_connect')
+
+    @admin.action(description='Autoriser la connexion')
+    def allow_connect(self, request, queryset):
+        count = queryset.update(can_connect=True)
+        self.message_user(request, f'{count} compte(s) autorisé(s) à se connecter.')
+
+    @admin.action(description='Bloquer la connexion')
+    def deny_connect(self, request, queryset):
+        count = queryset.exclude(pk=request.user.pk).update(can_connect=False)
+        self.message_user(request, f'{count} compte(s) bloqué(s) (votre propre compte est ignoré).')
 
     @admin.display(description='Photo')
     def avatar_thumb(self, obj):

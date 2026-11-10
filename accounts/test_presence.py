@@ -44,7 +44,7 @@ class PresenceRegistryTests(TestCase):
             self.assertFalse(presence.is_connected(1))
 
     def test_user_brief_uses_presence(self):
-        u = User.objects.create_user('alice', password='x')
+        u = User.objects.create_user('alice', password='x', can_connect=True)
         self.assertFalse(user_brief(u)['online'])
         presence.register(u.pk, 'a')
         presence.update(u.pk, 'a', True)
@@ -55,7 +55,7 @@ class PresenceRegistryTests(TestCase):
 class IdleLogoutTests(TestCase):
     def setUp(self):
         cache.clear()
-        self.user = User.objects.create_user('alice', password='x')
+        self.user = User.objects.create_user('alice', password='x', can_connect=True)
         self.client = Client()
         self.client.force_login(self.user)
 
@@ -98,7 +98,7 @@ class ImmediateExecutor:
 class LockedPushTests(TestCase):
     def setUp(self):
         presence.reset()
-        self.bob = User.objects.create_user('bob', password='x')
+        self.bob = User.objects.create_user('bob', password='x', can_connect=True)
         patcher = mock.patch.object(push, '_executor', ImmediateExecutor())
         patcher.start()
         self.webpush = mock.patch('pywebpush.webpush').start()
@@ -130,8 +130,8 @@ class ConsumerPresenceTests(TransactionTestCase):
         from chat import services
         from chat.consumers import KozonsConsumer
         presence.reset()
-        alice = await sync_to_async(User.objects.create_user)('alice', password='x')
-        bob = await sync_to_async(User.objects.create_user)('bob', password='x')
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
         await sync_to_async(services.get_or_create_direct)(alice, bob)
 
         async def connect(user):

@@ -1,5 +1,6 @@
 """Connexion WebSocket unique par appareil : messages, présence, saisie, appels."""
 import asyncio
+import logging
 import time
 
 from asgiref.sync import async_to_sync
@@ -23,6 +24,8 @@ from .models import Call, Participant
 from .realtime import push, user_group
 from .serializers import call_data
 
+logger = logging.getLogger(__name__)
+
 
 # Coupure de la connexion temps réel pendant un appel (réseau mobile qui change, écran verrouillé,
 # application en arrière-plan…) : l'audio/vidéo WebRTC continue souvent sans elle. On laisse à
@@ -33,11 +36,21 @@ def call_grace():
 CALL_MAX_DURATION = timedelta(hours=12)
 
 
+def ring_timeout():
+    """Durée de sonnerie (secondes) avant « appel manqué », décidée par le serveur (réglage CALL_RING_TIMEOUT)."""
+    return getattr(settings, 'CALL_RING_TIMEOUT', 45)
+
+
 def finish_call(call, status):
-    call.status = status
-    call.ended_at = timezone.now()
+    """Termine l'appel une seule fois, même si deux fins arrivent en même temps (décroché pendant
+    l'expiration, raccrocher des deux côtés…). Renvoie False s'il était déjà terminé."""
+    now = timezone.now()
+    if not Call.objects.filter(pk=call.pk, status__in=('ringing', 'ongoing')).update(status=status, ended_at=now):
+        return False
+    call.status, call.ended_at = status, now
     if status == 'missed':
-        # Remplace la notification « appel entrant » par « appel manqué ».
+        # Remplace la notification « appel entrant » (même tag) par « appel manqué ». Envoyée même si
+        # l'application est ouverte en arrière-plan ; le service worker l'ignore si elle est à l'écran.
         send_to_users([call.callee_id], {
             'kind': 'missed_call',
             'title': 'Appel manqué',
@@ -45,9 +58,16 @@ def finish_call(call, status):
             'icon': call.caller.avatar.url if call.caller.avatar else None,
             'url': '/calls',
             'tag': f'call-{call.pk}',
-        }, ttl=TTL_SOCIAL, topic=f'call-{call.pk}')
-    call.save()
+        }, ttl=TTL_SOCIAL, topic=f'call-{call.pk}', only_offline=False)
     push([call.caller_id, call.callee_id], 'call.ended', {'call': call_data(call), 'reason': status})
+    return True
+
+
+def expire_ringing(call_id):
+    """Fin de la sonnerie sans réponse : appel manqué (même si le client de l'appelant ne le dit pas)."""
+    call = Call.objects.filter(pk=call_id, status='ringing').select_related('caller', 'callee').first()
+    if call:
+        finish_call(call, 'missed')
 
 
 def end_calls_if_gone(user_id):
@@ -76,6 +96,14 @@ def is_stale(call):
     if started and timezone.now() - started > CALL_MAX_DURATION:
         return True
     return _absent_too_long(call.caller_id) or _absent_too_long(call.callee_id)
+
+
+async def _expire_ring_later(call_id, delay):
+    await asyncio.sleep(delay)
+    try:
+        await database_sync_to_async(expire_ringing)(call_id)
+    except Exception:
+        logger.exception('Fin de sonnerie de l\'appel %s', call_id)
 
 
 async def _end_calls_later(user_id, delay):
@@ -145,10 +173,16 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
         try:
             result = await database_sync_to_async(handler)(content)
         except Exception as exc:  # une erreur ne doit jamais couper la connexion
-            await self.send_json({'type': 'error', 'data': {'message': str(exc), 'for': kind}})
+            error = {'message': str(exc), 'for': kind}
+            if getattr(exc, 'code', None):
+                error['code'] = exc.code
+            await self.send_json({'type': 'error', 'data': error})
             return
         if result is not None:
             await self.send_json(result)
+            if kind == 'call.start' and result.get('type') == 'call.created':
+                # Sonnerie limitée côté serveur : l'appel devient « manqué » même si l'appelant a fermé l'application.
+                asyncio.ensure_future(_expire_ring_later(result['data']['call']['id'], ring_timeout()))
 
     # ------------------------------------------------------------ présence
 
@@ -179,9 +213,10 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
         user = User.objects.get(pk=self.user.pk)
         svc.mark_all_delivered(user)
         # Ouverture de l'application depuis une notification d'appel : l'appel sonne encore ?
-        recent = timezone.now() - timedelta(seconds=45)
+        # Uniquement à CET appareil : les autres sonnent déjà (un doublon leur ferait refuser l'appel).
+        recent = timezone.now() - timedelta(seconds=ring_timeout())
         for call in Call.objects.filter(callee=user, status='ringing', started_at__gte=recent).select_related('caller', 'callee'):
-            push([user.pk], 'call.incoming', {'call': call_data(call)})
+            self._to_me('call.incoming', {'call': call_data(call)})
         # Reconnexion pendant un appel : on renvoie à cet appareil ce qu'il a pu manquer pendant la coupure.
         mine = Q(caller=user) | Q(callee=user)
         for call in Call.objects.filter(mine, status='ongoing', caller=user).select_related('caller', 'callee'):
@@ -193,8 +228,12 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
         async_to_sync(self.channel_layer.send)(self.channel_name, {'type': 'deliver', 'event': event, 'data': data})
 
     def _on_disconnect(self):
-        self._live_disconnect()
-        self._meet_disconnect()
+        # Chaque nettoyage est isolé : une erreur dans un live ne doit pas laisser un fantôme en réunion.
+        for cleanup in (self._live_disconnect, self._meet_disconnect):
+            try:
+                cleanup()
+            except Exception:
+                logger.exception('Nettoyage à la déconnexion (%s)', cleanup.__name__)
         was_online, online, remaining = presence.unregister(self.user.pk, self.channel_name)
         if was_online and not online:
             self._broadcast_presence(False)
@@ -205,6 +244,7 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
         # Le ping (toutes les 25 s) indique aussi si l'utilisateur est actif sur la plateforme.
         active = content.get('active')
         self._set_presence(None if active is None else bool(active))
+        self._meet_heartbeat()
         return {'type': 'pong', 'data': {'t': content.get('t')}}
 
     def _presence(self, content):
@@ -250,12 +290,22 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
         return call
 
     def _call_start(self, content):
+        # `ref` : identifiant choisi par le client, renvoyé tel quel pour qu'il reconnaisse SA demande
+        # (et ignore les événements d'un appel précédent arrivés en retard).
+        ref = str(content.get('ref') or '')[:40]
         callee = User.objects.filter(pk=int(content.get('to') or 0), is_active=True).first()
         if callee is None or callee.pk == self.user.pk:
             raise ValueError('Destinataire invalide.')
         if Block.between(self.user, callee):
             raise ValueError("Impossible d'appeler ce contact.")
         caller = User.objects.get(pk=self.user.pk)
+        # Sonneries restées sans suite : l'appel précédent de l'appelant (il rappelle) et les
+        # sonneries trop anciennes (serveur redémarré, application fermée) deviennent « manqués ».
+        too_old = timezone.now() - timedelta(seconds=ring_timeout())
+        involved = Q(caller=caller) | Q(callee=caller) | Q(caller=callee) | Q(callee=callee)
+        for old in Call.objects.filter(involved, status='ringing').select_related('caller', 'callee'):
+            if old.caller_id == caller.pk or old.started_at < too_old:
+                finish_call(old, 'missed')
         call = Call.objects.create(caller=caller, callee=callee, video=bool(content.get('video')))
         busy = False
         for other in Call.objects.filter(Q(caller=callee) | Q(callee=callee), status='ongoing').exclude(pk=call.pk).select_related('caller'):
@@ -267,9 +317,10 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
             call.status = 'busy'
             call.ended_at = timezone.now()
             call.save()
-            return {'type': 'call.ended', 'data': {'call': call_data(call), 'reason': 'busy'}}
+            return {'type': 'call.ended', 'data': {'call': call_data(call), 'reason': 'busy', 'ref': ref}}
         push([callee.pk], 'call.incoming', {'call': call_data(call)})
-        # Application fermée : notification push (sonnerie) sur ses appareils.
+        # Notification push (sonnerie) sur ses appareils : application fermée, en arrière-plan ou
+        # téléphone verrouillé. Le service worker ne l'affiche pas si Kozons est déjà à l'écran.
         send_to_users([callee.pk], {
             'kind': 'call',
             'title': caller.name,
@@ -277,17 +328,20 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
             'icon': caller.avatar.url if caller.avatar else None,
             'url': '/calls',
             'tag': f'call-{call.pk}',
-        }, ttl=TTL_CALL, urgency='high', topic=f'call-{call.pk}')
-        # Le client de l'appelant raccroche (appel manqué) après 45 s sans réponse.
-        return {'type': 'call.created', 'data': {'call': call_data(call), 'callee_online': presence.is_connected(callee.pk)}}
+        }, ttl=TTL_CALL, urgency='high', topic=f'call-{call.pk}', only_offline=False)
+        # Sans réponse au bout de ring_timeout() : appel manqué (voir receive_json).
+        return {'type': 'call.created', 'data': {
+            'call': call_data(call), 'callee_online': presence.is_connected(callee.pk), 'ref': ref,
+            'ring_timeout': ring_timeout(),
+        }}
 
     def _call_accept(self, content):
         call = self._call_for_me(content)
-        if call.callee_id != self.user.pk or call.status != 'ringing':
+        # Atomique : un décroché au moment exact où la sonnerie expire ne peut pas « réussir » à moitié.
+        now = timezone.now()
+        if call.callee_id != self.user.pk or not Call.objects.filter(pk=call.pk, status='ringing').update(status='ongoing', answered_at=now):
             raise ValueError("Cet appel n'est plus disponible.")
-        call.status = 'ongoing'
-        call.answered_at = timezone.now()
-        call.save()
+        call.status, call.answered_at = 'ongoing', now
         push([call.caller_id], 'call.accepted', {'call': call_data(call)})
         # Arrête la sonnerie sur les autres appareils du destinataire.
         push([call.callee_id], 'call.handled', {'call_id': call.pk, 'channel': self.channel_name})
@@ -296,7 +350,8 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
     def _call_decline(self, content):
         call = self._call_for_me(content)
         if call.status == 'ringing':
-            self._finish_call(call, 'declined')
+            # `busy` : le destinataire est déjà en communication (son application répond pour lui).
+            self._finish_call(call, 'busy' if content.get('busy') else 'declined')
         return None
 
     def _call_end(self, content):

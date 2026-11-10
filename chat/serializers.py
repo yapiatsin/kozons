@@ -42,6 +42,7 @@ def story_preview(story):
         'id': story.pk,
         'kind': story.kind,
         'file': story.file.url if story.file else None,
+        'poster': story.poster.url if story.poster else None,
         'text': story.text[:100],
         'background': story.background,
         'expired': story.expires_at is not None and story.expires_at <= timezone.now(),

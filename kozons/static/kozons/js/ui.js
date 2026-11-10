@@ -223,18 +223,33 @@ export function promptDialog(title, { value = '', placeholder = '', multiline = 
 /** Menu contextuel positionné près d'un élément ou d'un point. */
 /** Menu contextuel. Éléments : { label, icon, action, danger, active, badge }, '-' (séparateur) ou
  *  { title } (intitulé de section). `side: 'right'` : ouvert à droite de l'ancre (barre latérale). */
-export function menu(anchor, items, { x, y, side } = {}) {
+/**
+ * Menu contextuel. `cls` : variante de style (ex. 'menu-wa' : grand menu façon WhatsApp, sans icônes).
+ * Un élément `{ label, submenu: [...] }` affiche « ▸ » et ouvre ses éléments à la même place (« Plus »).
+ */
+export function menu(anchor, items, { x, y, side, onClose, cls, edge } = {}) {
   closeMenus();
-  const list = h('div.menu', { role: 'menu' });
+  // `edge` : élément (barre du haut) sous lequel le menu se colle, aligné sur son bord droit.
+  const list = h('div.menu' + (cls ? '.' + cls : '') + (edge ? '.edge' : ''), { role: 'menu' });
   for (const it of items.filter(Boolean)) {
     if (it === '-') { list.appendChild(h('div.menu-sep')); continue; }
     if (it.title) { list.appendChild(h('div.menu-title', it.title)); continue; }
-    list.appendChild(h('button.menu-item' + (it.danger ? '.danger' : '') + (it.active ? '.active' : ''), {
-      type: 'button', role: 'menuitem',
-      onclick: e => { e.stopPropagation(); closeMenus(); it.action(); },
-    }, it.icon ? icon(it.icon, 18) : null, h('span', it.label), it.badge ? h('span.menu-badge', it.badge > 99 ? '99+' : String(it.badge)) : null));
+    const open = it.submenu ? () => {
+      // Le sous-menu remplace le menu, aligné sur son bord droit et son haut (comme WhatsApp).
+      const r = list.getBoundingClientRect();
+      const keep = layer._onClose;
+      layer._onClose = null;
+      menu({ getBoundingClientRect: () => ({ left: r.left, right: r.right, top: r.top - 4, bottom: r.top - 4 }) },
+        it.submenu, { onClose: keep, cls, edge });
+    } : null;
+    list.appendChild(h('button.menu-item' + (it.danger ? '.danger' : '') + (it.active ? '.active' : '') + (it.submenu ? '.has-sub' : ''), {
+      type: 'button', role: 'menuitem', 'aria-haspopup': it.submenu ? 'menu' : null,
+      onclick: e => { e.stopPropagation(); if (open) return open(); closeMenus(); it.action(); },
+    }, it.icon ? icon(it.icon, 18) : null, h('span', it.label), it.badge ? h('span.menu-badge', it.badge > 99 ? '99+' : String(it.badge)) : null,
+    it.submenu ? h('span.menu-sub-arrow', { 'aria-hidden': 'true' }, '▸') : null));
   }
   const layer = h('div.menu-layer', { onmousedown: e => { if (e.target === layer) closeMenus(); }, oncontextmenu: e => { e.preventDefault(); closeMenus(); } }, list);
+  layer._onClose = onClose;  // appelé à la fermeture (choix, clic à côté, Échap…)
   overlayRoot().appendChild(layer);
   const r = anchor ? anchor.getBoundingClientRect() : { left: x, right: x, top: y, bottom: y };
   const mw = list.offsetWidth, mh = list.offsetHeight;
@@ -244,13 +259,157 @@ export function menu(anchor, items, { x, y, side } = {}) {
   if (left < 8) left = Math.min(r.left, window.innerWidth - mw - 8);
   if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
   if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 4);
+  if (edge) {
+    const er = edge.getBoundingClientRect();
+    list.style.right = Math.max(0, document.documentElement.clientWidth - er.right) + 'px';
+    list.style.left = 'auto';
+    list.style.top = er.bottom + 'px';
+    list.style.maxHeight = (window.innerHeight - er.bottom - 8) + 'px';
+    return layer;
+  }
   list.style.left = Math.max(8, left) + 'px';
   list.style.top = top + 'px';
   return layer;
 }
 
+// ------------------------------------------------------------------ sélecteur de date (style Android / WhatsApp)
+
+const DP_MONTHS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+const DP_DAYS_SHORT = ['Dim.', 'Lun.', 'Mar.', 'Mer.', 'Jeu.', 'Ven.', 'Sam.'];
+const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const parseDay = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+
+/**
+ * Calendrier en fenêtre : en-tête (année + « Mar. 10 nov. »), mois précédent / suivant, grille des
+ * jours, « Annuler » / « OK ». Toucher l'année ouvre la liste des années.
+ * Renvoie une promesse : la date choisie (« AAAA-MM-JJ ») ou null.
+ */
+export function datePicker({ value, min = '2015-01-01', max, title } = {}) {
+  return new Promise(resolve => {
+    const today = new Date();
+    const maxDate = max ? parseDay(max) : null;
+    const minDate = parseDay(min);
+    let selected = value ? parseDay(value) : (maxDate && maxDate < today ? maxDate : today);
+    let view = new Date(selected.getFullYear(), selected.getMonth(), 1);
+    let mode = 'days';
+    const allowed = d => !(maxDate && d > maxDate) && d >= minDate;
+
+    const yearEl = h('button.dp-year', { type: 'button', onclick: () => { mode = mode === 'years' ? 'days' : 'years'; paint(); } });
+    const dateEl = h('div.dp-date');
+    const monthLabel = h('div.dp-month-label', { 'aria-live': 'polite' });
+    const prevBtn = h('button.dp-nav', { type: 'button', 'aria-label': 'Mois précédent', onclick: () => shift(-1) }, icon('chevronLeft', 22));
+    const nextBtn = h('button.dp-nav.next', { type: 'button', 'aria-label': 'Mois suivant', onclick: () => shift(1) }, icon('chevronLeft', 22));
+    const grid = h('div.dp-grid', { role: 'grid' });
+    const body = h('div.dp-body');
+
+    function shift(n) {
+      const v = new Date(view.getFullYear(), view.getMonth() + n, 1);
+      if (n > 0 && maxDate && v > maxDate) return;
+      if (n < 0 && new Date(v.getFullYear(), v.getMonth() + 1, 0) < minDate) return;
+      view = v;
+      paint();
+    }
+
+    function paint() {
+      yearEl.textContent = String(selected.getFullYear());
+      yearEl.classList.toggle('active', mode === 'years');
+      // « Mar. 10 nov. » (mois abrégé à la française : nov., juil., mai…).
+      dateEl.textContent = `${DP_DAYS_SHORT[selected.getDay()]} ${selected.getDate()} ${selected.toLocaleDateString('fr-FR', { month: 'short' })}`;
+      dateEl.classList.toggle('dim', mode === 'years');
+      if (mode === 'years') {
+        const last = (maxDate || today).getFullYear() + (maxDate ? 0 : 5);
+        const years = [];
+        for (let y = last; y >= minDate.getFullYear(); y--) years.push(y);
+        const list = h('div.dp-years', years.map(y => h('button.dp-year-item' + (y === selected.getFullYear() ? '.on' : ''), {
+          type: 'button',
+          onclick: () => {
+            let d = new Date(y, selected.getMonth(), Math.min(selected.getDate(), new Date(y, selected.getMonth() + 1, 0).getDate()));
+            if (maxDate && d > maxDate) d = new Date(maxDate);
+            if (d < minDate) d = new Date(minDate);
+            selected = d;
+            view = new Date(d.getFullYear(), d.getMonth(), 1);
+            mode = 'days';
+            paint();
+          },
+        }, String(y))));
+        clear(body, list);
+        const on = list.querySelector('.on');
+        if (on) on.scrollIntoView({ block: 'center' });
+        return;
+      }
+      monthLabel.textContent = `${DP_MONTHS[view.getMonth()][0].toUpperCase()}${DP_MONTHS[view.getMonth()].slice(1)} ${view.getFullYear()}`;
+      const lastOfPrev = new Date(view.getFullYear(), view.getMonth(), 0);
+      prevBtn.disabled = lastOfPrev < minDate;
+      nextBtn.disabled = !!maxDate && new Date(view.getFullYear(), view.getMonth() + 1, 1) > maxDate;
+      const offset = (view.getDay() + 6) % 7;   // semaine du lundi au dimanche
+      const count = new Date(view.getFullYear(), view.getMonth() + 1, 0).getDate();
+      const cells = [];
+      for (let i = 0; i < offset; i++) cells.push(h('span.dp-blank'));
+      for (let d = 1; d <= count; d++) {
+        const date = new Date(view.getFullYear(), view.getMonth(), d);
+        const ok = allowed(date);
+        const isSel = isoDay(date) === isoDay(selected);
+        cells.push(h('button.dp-cell' + (isSel ? '.on' : '') + (isoDay(date) === isoDay(today) ? '.today' : ''), {
+          type: 'button', disabled: !ok, 'aria-pressed': String(isSel), 'aria-label': date.toLocaleDateString('fr-FR', { dateStyle: 'full' }),
+          onclick: () => { selected = date; paint(); },
+        }, String(d)));
+      }
+      clear(grid, cells);
+      clear(body,
+        h('div.dp-month', prevBtn, monthLabel, nextBtn),
+        h('div.dp-week', ['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(l => h('span', l))),
+        grid);
+    }
+
+    // Balayer la grille à gauche / à droite : mois suivant / précédent (téléphone).
+    let sx = null;
+    body.addEventListener('pointerdown', e => { if (mode === 'days') sx = e.clientX; });
+    body.addEventListener('pointerup', e => {
+      if (sx === null) return;
+      const dx = e.clientX - sx;
+      sx = null;
+      if (Math.abs(dx) > 50) shift(dx < 0 ? 1 : -1);
+    });
+
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey);
+      back.classList.add('closing');
+      setTimeout(() => back.remove(), 150);
+      resolve(v);
+    };
+    const onKey = e => {
+      if (e.key === 'Escape') finish(null);
+      else if (e.key === 'Enter') finish(isoDay(selected));
+    };
+    const box = h('div.dp', { role: 'dialog', 'aria-modal': 'true', 'aria-label': title || 'Choisir une date' },
+      h('div.dp-head', yearEl, dateEl),
+      body,
+      h('div.dp-actions',
+        h('button.dp-btn', { type: 'button', onclick: () => finish(null) }, 'Annuler'),
+        h('button.dp-btn', { type: 'button', onclick: () => finish(isoDay(selected)) }, 'OK')));
+    const back = h('div.dp-back', { onmousedown: e => { if (e.target === back) finish(null); } }, box);
+    document.addEventListener('keydown', onKey);
+    overlayRoot().appendChild(back);
+    paint();
+  });
+}
+
+// Boutons d'envoi (data-keep-focus) : les toucher ne retire pas le focus du champ de saisie. Sinon, sur
+// téléphone, le clavier se ferme d'abord, la page se décale et le toucher tombe à côté : il fallait
+// appuyer deux fois pour envoyer. Le clavier reste ouvert, comme sur WhatsApp.
+document.addEventListener('mousedown', e => {
+  const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  if (typing && e.target.closest && e.target.closest('[data-keep-focus]')) e.preventDefault();
+}, true);
+
 export function closeMenus() {
-  document.querySelectorAll('.menu-layer').forEach(el => el.remove());
+  document.querySelectorAll('.menu-layer').forEach(el => {
+    el.remove();
+    if (el._onClose) { const fn = el._onClose; el._onClose = null; try { fn(); } catch (e) { console.error(e); } }
+  });
 }
 
 export function toast(message, { type = 'info', timeout = 3500, action } = {}) {

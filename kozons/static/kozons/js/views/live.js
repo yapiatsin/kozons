@@ -251,7 +251,7 @@ function buildLiveUI(page, ctx) {
     type: 'button', 'aria-label': 'Emoji',
     onclick: e => emojiPopover(e.currentTarget, em => { input.value += em; input.focus(); }),
   }, icon('smile', 20));
-  const sendBtn = h('button.live-send.wide-only', { type: 'button', 'aria-label': 'Envoyer', onclick: sendComment }, icon('send', 18));
+  const sendBtn = h('button.live-send.wide-only', { type: 'button', 'aria-label': 'Envoyer', 'data-keep-focus': '', onclick: sendComment }, icon('send', 18));
 
   const likeBtn = h('button.live-action.like', { type: 'button', 'aria-label': "J'aime" }, icon('heart', 26));
   let pendingLikes = 0;

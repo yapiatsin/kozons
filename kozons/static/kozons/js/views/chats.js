@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { bus, state, sortedConversations, convTitle, convAvatar, peerOf, isMuted } from '../store.js';
 import { send } from '../ws.js';
 import {
-  h, clear, icon, btn, avatar, menu, toast, errorToast, confirmDialog, listTime, dayLabel, lastSeenLabel,
+  h, clear, icon, btn, avatar, menu, toast, errorToast, confirmDialog, datePicker, listTime, dayLabel, lastSeenLabel,
   debounce, autoGrow, pickFiles, emojiPicker, empty, spinner, QUICK_REACTIONS, duration, closeMenus, onLongPress, resizablePanel,
 } from '../ui.js';
 import {
@@ -14,7 +14,7 @@ import {
   newChatDialog, newGroupDialog, forwardDialog, forwardMessages, contactDialog, pollDialog, mediaPreviewDialog, reactionsDialog, messageInfoDialog,
 } from './dialogs.js';
 import { renderInfo } from './chatinfo.js';
-import { stickerPanel, stickerActionsDialog, loadStickers } from './stickerpanel.js';
+import { stickerPanel, stickerActionsDialog, loadStickers, createStickerDialog } from './stickerpanel.js';
 import { mentionInput } from './mentions.js';
 import { startCall } from './calls.js';
 import { applyWallpaper, themeDialog } from '../wallpapers.js';
@@ -373,6 +373,7 @@ async function openConversation(convId) {
   const paneMain = h('div.pane-main', paneBody, composer);
   applyWallpaper(paneMain, convId);
   clear(paneEl, header, paneMain);
+  if (window.CSS && CSS.highlights) CSS.highlights.delete('kz-search');  // recherche de la discussion précédente
 
   pane = {
     convId, conv, header, scroller, listWrap, topLoader, downBtn, composer, paneBody,
@@ -436,7 +437,11 @@ function updateHeader() {
   if (!pane) return;
   const conv = pane.conv = state.conversations.get(pane.convId) || pane.conv;
   pane.header.classList.toggle('sel-head', !!pane.msgSel);
+  pane.header.classList.toggle('search-head', !pane.msgSel && !!pane.search);
   if (pane.msgSel) return clear(pane.header, ...selectionBar());
+  // Recherche en cours : la barre de recherche occupe l'en-tête (elle n'est pas reconstruite à chaque
+  // mise à jour de la discussion, pour ne pas perdre la saisie).
+  if (pane.search) { if (!pane.header.contains(pane.search.el)) clear(pane.header, pane.search.el); return; }
   const peer = peerOf(conv);
   clear(pane.header,
     btn('back', 'Retour', () => window.kozons.go('/'), 'back-btn'),
@@ -448,22 +453,34 @@ function updateHeader() {
         btn('video', 'Appel vidéo', () => startCall(peer, true)),
         btn('phone', 'Appel audio', () => startCall(peer, false)),
       ] : null,
-      btn('search', 'Rechercher', () => openSearch()),
-      btn('more', 'Menu', e => menu(e.currentTarget, [
-        { label: conv.kind === 'group' ? 'Infos du groupe' : 'Infos du contact', icon: 'info', action: toggleInfo },
-        { label: 'Médias, liens et docs', icon: 'image', action: () => { openInfo(); } },
-        { label: isMuted(conv) ? 'Réactiver les notifications' : 'Mettre en sourdine', icon: 'bellOff', action: () => {
-          const setting = data => api.post(`conversations/${conv.id}/settings`, data).then(c => { state.conversations.set(c.id, c); bus.emit('conversations:changed', c.id); }).catch(errorToast);
-          isMuted(conv) ? setting({ mute_hours: 0 }) : muteDialog(conv, setting);
-        } },
-        { label: 'Messages éphémères', icon: 'timer', action: () => disappearingDialog(conv) },
-        { label: 'Thème de la discussion', icon: 'image', action: () => themeDialog(conv.id) },
-        { label: 'Fermer la discussion', icon: 'close', action: () => window.kozons.go('/') },
-        '-',
-        { label: 'Vider la discussion', icon: 'trash', danger: true, action: () => clearChat(conv) },
-        conv.kind === 'direct' && peer ? { label: conv.blocked.by_me ? 'Débloquer' : 'Bloquer', icon: 'block', danger: !conv.blocked.by_me, action: () => toggleBlock(conv, peer) } : null,
-        conv.kind === 'group' ? { label: 'Quitter le groupe', icon: 'logout', danger: true, action: () => leaveGroup(conv) } : null,
-      ]))));
+      // Ordinateur : loupe directe dans l'en-tête ; téléphone : « Rechercher » est dans le menu ⋮ (comme WhatsApp).
+      btn('search', 'Rechercher', () => openSearch(), 'head-search'),
+      btn('more', 'Menu', e => menu(e.currentTarget, chatMenuItems(conv, peer), { cls: 'menu-wa', edge: pane.header }))));
+}
+
+/** Menu ⋮ d'une discussion, dans l'ordre de WhatsApp ; les actions rares ou destructrices sont sous « Plus ». */
+function chatMenuItems(conv, peer) {
+  const direct = conv.kind === 'direct';
+  const muted = isMuted(conv);
+  const setting = data => api.post(`conversations/${conv.id}/settings`, data)
+    .then(c => { state.conversations.set(c.id, c); bus.emit('conversations:changed', c.id); }).catch(errorToast);
+  return [
+    direct ? { label: 'Nouveau groupe', action: () => newGroupDialog() } : null,
+    direct ? '-' : null,
+    { label: direct ? 'Afficher le contact' : 'Infos du groupe', action: toggleInfo },
+    { label: 'Rechercher', action: () => openSearch() },
+    { label: direct ? 'Médias, liens et documents' : 'Médias du groupe', action: () => openInfo() },
+    { label: muted ? 'Désactiver le mode silencieux' : 'Mode silencieux', action: () => (muted ? setting({ mute_hours: 0 }) : muteDialog(conv, setting)) },
+    { label: 'Messages éphémères', action: () => disappearingDialog(conv) },
+    { label: 'Thème de la discussion', action: () => themeDialog(conv.id) },
+    '-',
+    { label: 'Plus', submenu: [
+      { label: 'Fermer la discussion', action: () => window.kozons.go('/') },
+      { label: 'Vider la discussion', danger: true, action: () => clearChat(conv) },
+      direct && peer ? { label: conv.blocked.by_me ? 'Débloquer' : 'Bloquer', danger: !conv.blocked.by_me, action: () => toggleBlock(conv, peer) } : null,
+      !direct ? { label: 'Quitter le groupe', danger: true, action: () => leaveGroup(conv) } : null,
+    ] },
+  ];
 }
 
 export function disappearingDialog(conv) {
@@ -506,24 +523,98 @@ function toggleInfo() {
   else openInfo();
 }
 
+// ------------------------------------------------------------------ recherche dans la discussion (façon WhatsApp)
+//
+// L'en-tête devient « ←  Rechercher…  📅 » ; en tapant, on saute au message le plus récent qui
+// correspond, les mots trouvés sont surlignés et ▲ ▼ passent au résultat plus ancien / plus récent.
+
 function openSearch() {
   if (!pane) return;
-  infoEl.classList.add('open');
-  const input = h('input.input', { type: 'search', placeholder: 'Rechercher dans la discussion…' });
-  const results = h('div.pick-list');
-  input.addEventListener('input', debounce(async () => {
+  if (pane.search) return pane.search.input.focus();
+  const input = h('input.search-head-input', { type: 'search', placeholder: 'Rechercher…', enterkeyhint: 'search', 'aria-label': 'Rechercher dans la discussion' });
+  const count = h('span.search-head-count');
+  const up = btn('chevronUp', 'Résultat plus ancien', () => step(1));
+  const down = btn('chevronDown', 'Résultat plus récent', () => step(-1));
+  let lastDay = null;
+  const calendar = btn('calendarSearch', 'Rechercher par date', async () => {
+    input.blur();  // le clavier se ferme : le calendrier occupe l'écran
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const day = await datePicker({ value: lastDay || today, max: today, title: 'Aller à la date' });
+    if (day) { lastDay = day; jumpToDate(day); }
+  });
+  const nav = h('div.search-head-nav', count, up, down);
+  const el = h('div.search-head-bar',
+    btn('back', 'Fermer la recherche', closeSearch, 'back-btn'),
+    input, nav, h('span.search-head-cal', calendar));
+  const search = pane.search = { el, input, hits: [], index: -1, q: '' };
+
+  const paint = () => {
+    const has = !!search.q;
+    nav.classList.toggle('hidden', !has);
+    calendar.classList.toggle('hidden', has);
+    count.textContent = !has ? '' : search.hits.length ? `${search.index + 1}/${search.hits.length}` : '0 résultat';
+    up.disabled = search.index >= search.hits.length - 1;
+    down.disabled = search.index <= 0;
+  };
+  function step(dir) {
+    const i = search.index + dir;
+    if (i < 0 || i >= search.hits.length) return;
+    search.index = i;
+    paint();
+    jumpTo(search.hits[i]);
+  }
+  const run = debounce(async () => {
     const q = input.value.trim();
-    if (q.length < 2) return clear(results);
+    search.q = q.length >= 2 ? q : '';
+    search.hits = []; search.index = -1;
+    paintHighlights();
+    if (!search.q) return paint();
     try {
-      const { results: items } = await api.get('messages/search', { q, conversation: pane.convId });
-      clear(results, items.length ? items.map(m => h('button.search-hit', { type: 'button', onclick: () => jumpTo(m.id) },
-        h('div.muted.small', listTime(m.created_at) + ' · ' + (m.sender_id === state.me.id ? 'Vous' : (m.sender || {}).name)),
-        h('div', m.text))) : h('div.muted.pad', 'Aucun message trouvé'));
+      const { results } = await api.get('messages/search', { q, conversation: pane.convId });
+      if (pane.search !== search || search.q !== q) return;  // saisie modifiée entre-temps
+      search.hits = results.map(m => m.id);   // du plus récent au plus ancien
+      search.index = search.hits.length ? 0 : -1;
+      paint();
+      if (search.hits.length) jumpTo(search.hits[0]);
     } catch (e) { errorToast(e); }
-  }, 250));
-  clear(infoEl, h('header.drawer-head', btn('close', 'Fermer', () => infoEl.classList.remove('open')), h('h3', 'Rechercher des messages')),
-    h('div.pad', input), results);
+  }, 300);
+  input.addEventListener('input', run);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeSearch(); }
+  });
+  paint();
+  updateHeader();
   input.focus();
+}
+
+function closeSearch() {
+  if (!pane || !pane.search) return;
+  pane.search = null;
+  paintHighlights();
+  updateHeader();
+}
+
+/** Surligne les mots recherchés dans les messages affichés (API « Custom Highlight », sans toucher au texte). */
+function paintHighlights() {
+  if (!window.CSS || !CSS.highlights || typeof Highlight === 'undefined') return;
+  const q = pane && pane.search && pane.search.q && pane.search.q.toLowerCase();
+  if (!q) return CSS.highlights.delete('kz-search');
+  const ranges = [];
+  const walker = document.createTreeWalker(pane.listWrap, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => (n.parentElement && n.parentElement.closest('.bubble .text') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT),
+  });
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const text = n.data.toLowerCase();
+    for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + q.length)) {
+      const r = new Range();
+      r.setStart(n, i);
+      r.setEnd(n, i + q.length);
+      ranges.push(r);
+    }
+  }
+  CSS.highlights.set('kz-search', new Highlight(...ranges));
 }
 
 // ------------------------------------------------------------------ rendu des messages
@@ -601,6 +692,7 @@ function renderMessages(ev = {}) {
   } else if (wasAtBottom && !ev.initial) {
     scrollToBottom(false);
   }
+  if (pane.search && pane.search.q) paintHighlights();  // nouveaux messages affichés : surlignage à jour
 }
 
 function onScroll() {
@@ -633,12 +725,21 @@ function scrollToBottom(smooth) {
 }
 
 /** Fait défiler jusqu'à un message, en le chargeant si nécessaire. */
-async function jumpTo(messageId) {
+async function jumpToDate(day) {
   if (!pane) return;
-  let node = pane.nodes.get(messageId);
+  try {
+    const res = await api.get(`conversations/${pane.convId}/messages`, { date: day, limit: 60 });
+    if (!res.target) return toast('Aucun message dans cette discussion.');
+    await jumpTo(res.target, res);
+  } catch (e) { errorToast(e); }
+}
+
+async function jumpTo(messageId, preloaded = null) {
+  if (!pane) return;
+  let node = preloaded ? null : pane.nodes.get(messageId);
   if (!node) {
     try {
-      const res = await api.get(`conversations/${pane.convId}/messages`, { around: messageId, limit: 60 });
+      const res = preloaded || await api.get(`conversations/${pane.convId}/messages`, { around: messageId, limit: 60 });
       const b = bucket(pane.convId);
       // On remplace la fenêtre chargée par celle autour du message.
       b.items = res.results;
@@ -891,6 +992,9 @@ function buildComposer() {
     pickerBody.replaceChildren(which === 'stickers' ? stickersTab : emojiTab);
     pickerSeg.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.tab === which));
     searchBtn.classList.toggle('invisible', which === 'stickers');
+    // Onglet stickers : le crayon (créer un sticker) remplace la touche effacer, comme WhatsApp.
+    delBtn.classList.toggle('hidden', which === 'stickers');
+    createBtn.classList.toggle('hidden', which !== 'stickers');
   };
   pickerSeg.append(
     h('button.active', { type: 'button', dataset: { tab: 'emoji' }, title: 'Emoji', 'aria-label': 'Emoji', onclick: () => showPicker('emoji') }, icon('smile', 22)),
@@ -921,10 +1025,11 @@ function buildComposer() {
   });
   ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => delBtn.addEventListener(ev, stopRepeat));
   pane.cleanup.push(stopRepeat);
-  const pickerHead = h('div.picker-head', h('span.picker-grip'), h('div.picker-bar', searchBtn, pickerSeg, delBtn));
+  const createBtn = btn('edit', 'Créer un sticker', () => createStickerDialog({ onSend: sticker => { sendSticker(sticker); closePicker(); } }), 'picker-create hidden');
+  const pickerHead = h('div.picker-head', h('span.picker-grip'), h('div.picker-bar', searchBtn, pickerSeg, delBtn, createBtn));
   const emojiPanel = h('div.emoji-panel.hidden', h('div.picker', pickerHead, pickerBody));
   const topBar = h('div.composer-top');
-  const sendBtn = h('button.send-btn', { type: 'button', 'aria-label': 'Envoyer' }, icon('mic', 22));
+  const sendBtn = h('button.send-btn', { type: 'button', 'aria-label': 'Envoyer', 'data-keep-focus': '' }, icon('mic', 22));
   pane.input = input;
   pane.topBar = topBar;
 
@@ -1042,6 +1147,9 @@ function buildComposer() {
   camBtn.classList.add('composer-cam');
   attach.classList.add('composer-attach');
   emojiBtn.classList.add('composer-emoji');
+  // Toucher ces boutons pendant la saisie ne doit pas d'abord fermer le clavier (la barre se décalerait
+  // et le toucher tomberait à côté) : c'est le bouton lui-même qui ferme le clavier si besoin.
+  [emojiBtn, attach, camBtn].forEach(b => b.setAttribute('data-keep-focus', ''));
   // Barre façon WhatsApp : une « pilule » (réponse citée au-dessus du champ) + bouton rond micro / envoyer.
   // Téléphone : emoji · champ · trombone · appareil photo, bouton rond à côté.
   // Ordinateur : trombone · emoji · champ, micro / envoyer dans la même barre (ordre réglé en CSS).

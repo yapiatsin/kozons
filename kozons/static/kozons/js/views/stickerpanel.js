@@ -79,7 +79,9 @@ export function stickerPanel({ onSend }) {
     if (!collection) { clear(grid, spinner()); return; }
     const items = collection[key] || [];
     const [, ic, label, hint] = TABS.find(t => t[0] === key);
-    const createTile = h('button.sticker-tile.create', { type: 'button', onclick: () => createStickerDialog({ onSend }) }, icon('plus', 26), h('span', 'Créer'));
+    // Tuile « Créer un sticker » façon WhatsApp : rond plein avec un crayon, libellé dessous.
+    const createTile = h('button.sticker-tile.create', { type: 'button', onclick: () => createStickerDialog({ onSend }) },
+      h('span.sticker-create-ic', icon('edit', 22)), h('span', 'Créer un sticker'));
     clear(grid,
       key !== 'favorites' ? createTile : null,
       items.map(tile),
@@ -93,7 +95,8 @@ export function stickerPanel({ onSend }) {
   }).catch(e => clear(grid, h('div.sticker-empty', e.message)));
   show(tab);
 
-  const el = h('div.sticker-panel', tabsEl, grid);
+  // Comme WhatsApp : les stickers en haut, la barre des catégories en bas (comme celle des emoji).
+  const el = h('div.sticker-panel', grid, tabsEl);
   el.cleanup = off;
   return el;
 }

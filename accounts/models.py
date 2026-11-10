@@ -1,4 +1,4 @@
-from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.models import AbstractUser, UserManager
 from django.db import models
 from django.utils import timezone
 
@@ -6,10 +6,20 @@ from django.utils import timezone
 def avatar_path(instance, filename):
     return f'avatars/{instance.pk or "new"}/{timezone.now():%Y%m%d%H%M%S}_{filename}'
 
+class KozonsUserManager(UserManager):
+    def create_superuser(self, username, email=None, password=None, **extra_fields):
+        # Le super admin peut toujours se connecter ; les autres comptes attendent une autorisation.
+        extra_fields.setdefault('can_connect', True)
+        return super().create_superuser(username, email, password, **extra_fields)
+
+    async def acreate_superuser(self, username, email=None, password=None, **extra_fields):
+        extra_fields.setdefault('can_connect', True)
+        return await super().acreate_superuser(username, email, password, **extra_fields)
+
 
 class User(AbstractUser):
     VISIBILITY = [('everyone', 'Tout le monde'), ('contacts', 'Mes contacts'), ('nobody', 'Personne')]
-
+    
     display_name = models.CharField(max_length=64, blank=True)
     avatar = models.ImageField(upload_to=avatar_path, blank=True)
     about = models.CharField(max_length=140, default="Salut ! J'utilise Kozons.", blank=True)
@@ -17,10 +27,8 @@ class User(AbstractUser):
     website = models.URLField(blank=True)
     phone = models.CharField(max_length=32, blank=True)
     is_private = models.BooleanField(default=False)
-
     # Présence
     last_seen = models.DateTimeField(null=True, blank=True)
-
     # Confidentialité
     last_seen_visibility = models.CharField(max_length=10, choices=VISIBILITY, default='everyone')
     avatar_visibility = models.CharField(max_length=10, choices=VISIBILITY, default='everyone')
@@ -29,6 +37,11 @@ class User(AbstractUser):
     # Invitations : lien personnel kozonstic.com/invite/<code> ; qui m'a fait venir sur Kozons.
     invite_code = models.CharField(max_length=12, unique=True, null=True, blank=True)
     invited_by = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='invitees')
+
+    # Accès à l'application : seul un compte à True peut se connecter (voir accounts.backends).
+    can_connect = models.BooleanField(default=False, null=True, verbose_name='Peut se connecter')
+
+    objects = KozonsUserManager()
 
     @property
     def name(self):

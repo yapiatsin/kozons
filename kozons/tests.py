@@ -14,7 +14,7 @@ from chat.models import (Call, Conversation, HiddenMessage, Message, Participant
                          StarredMessage, Sticker, UserSticker, ViewOnceOpened)
 from live.models import LiveBan, LiveComment, LiveGift, LiveStream, LiveViewer
 from social.models import (CloseFriend, Comment, CommentLike, Follow, Like, Notification, Post, PostMedia, SavedPost,
-                           Story, StoryView)
+                           Story, StoryReport, StoryView)
 
 MEDIA = tempfile.mkdtemp()
 
@@ -37,8 +37,8 @@ class AdminPagesTests(TestCase):
     def setUp(self):
         self.admin_user = User.objects.create_superuser('root', 'root@example.com', 'Kozons2026')
         self.client.force_login(self.admin_user)
-        a = User.objects.create_user('alice', avatar=image())
-        b = User.objects.create_user('bob')
+        a = User.objects.create_user('alice', avatar=image(), can_connect=True)
+        b = User.objects.create_user('bob', can_connect=True)
         now = timezone.now()
         Block.objects.create(blocker=a, blocked=b)
         OneTimeCode.objects.create(user=a, code_hash='x' * 64, expires_at=now + timedelta(minutes=5))
@@ -76,6 +76,7 @@ class AdminPagesTests(TestCase):
         story = Story.objects.create(user=a, kind='text', text='Salut', background='#0099cc')
         Story.objects.create(user=a, kind='image', file=image(), expires_at=now - timedelta(hours=1))
         StoryView.objects.create(story=story, user=b, liked=True)
+        StoryReport.objects.create(story=story, author=a, reporter=b, reason='spam', snapshot={'kind': 'text', 'text': 'Salut'})
         Notification.objects.create(recipient=a, actor=b, verb='comment', post=post, comment=comment)
         live = LiveStream.objects.create(host=a, title='Soirée live', likes_count=1200)
         LiveStream.objects.create(host=b, status='ended', ended_at=now)

@@ -1,3 +1,4 @@
+import sys
 import os
 from pathlib import Path
 
@@ -108,6 +109,8 @@ else:
     CHANNEL_LAYERS = {'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'}}
 
 AUTH_USER_MODEL = 'accounts.User'
+# Refuse la connexion (et les sessions ouvertes) des comptes dont can_connect n'est pas à True.
+AUTHENTICATION_BACKENDS = ['accounts.backends.CanConnectBackend']
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -129,6 +132,14 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 KOZONS_MAX_UPLOAD = 100 * 1024 * 1024
+# Vidéos de statut : stockées en MP4 H.264, 720 px sur le petit côté, ~1,5 Mbit/s, 90 s max (social/storymedia.py).
+STORY_VIDEO_MAX_SECONDS = config('STORY_VIDEO_MAX_SECONDS', default=90, cast=int)
+STORY_VIDEO_SIDE = config('STORY_VIDEO_SIDE', default=720, cast=int)
+STORY_VIDEO_KBPS = config('STORY_VIDEO_KBPS', default=1500, cast=int)
+STORY_TRANSCODE_WORKERS = config('STORY_TRANSCODE_WORKERS', default=2, cast=int)   # conversions simultanées
+STORY_DAILY_LIMIT = config('STORY_DAILY_LIMIT', default=30, cast=int)              # statuts par 24 h et par personne
+# Conversions et ménage en arrière-plan ; pendant les tests, exécutés tout de suite (base de test partagée).
+KOZONS_STORY_ASYNC = 'test' not in sys.argv[1:2]
 
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 60
 LOGIN_URL = '/'

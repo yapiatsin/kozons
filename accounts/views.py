@@ -28,6 +28,9 @@ USERNAME_RE = re.compile(r'^[a-zA-Z0-9._]{3,30}$')
 RESET_SALT = 'kozons.password-reset'
 RESET_TOKEN_MAX_AGE = 15 * 60
 RESEND_COOLDOWN = timedelta(seconds=60)
+AUTH_BACKEND = 'accounts.backends.CanConnectBackend'
+PENDING_ACCESS_MESSAGE = ("Votre compte n'est pas encore autorisé à se connecter. "
+                          "Vous pourrez accéder à Kozons dès qu'un administrateur l'aura activé.")
 
 
 def clean_email(value, exclude_user=None):
@@ -78,6 +81,9 @@ def register(request):
         raise ApiError("Ce nom d'utilisateur est déjà pris.")
     if inviter:
         welcome_invitee(inviter, user)
+    if not user.can_connect:
+        # Compte créé mais en attente d'autorisation : pas de session ouverte.
+        return {'user': None, 'pending': True, 'message': PENDING_ACCESS_MESSAGE}
     open_session(request, user, remember=True)
     return {'user': user_private(user)}
 
@@ -149,6 +155,9 @@ def login_view(request):
     user = authenticate(request, username=account.username if account else identifier.lower(),
                         password=data.get('password') or '')
     if user is None:
+        password = data.get('password') or ''
+        if account and account.is_active and not account.can_connect and account.check_password(password):
+            raise ApiError(PENDING_ACCESS_MESSAGE, 403)
         raise ApiError('Identifiants incorrects.', 401)
     remember = as_bool(data.get('remember'))
     open_session(request, user, remember=remember)
@@ -159,7 +168,7 @@ def open_session(request, user, remember=False):
     """Ouvre la session. « Se souvenir de moi » : session longue (SESSION_COOKIE_AGE), conservée à la
     fermeture du navigateur et sans déconnexion pour inactivité. Sinon : la session se ferme avec le
     navigateur, ou après IDLE_LOGOUT_MINUTES d'absence."""
-    login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+    login(request, user, backend=AUTH_BACKEND)
     request.session['kz_remember'] = bool(remember)
     request.session.set_expiry(settings.SESSION_COOKIE_AGE if remember else 0)
 
@@ -343,8 +352,10 @@ def password_reset(request):
         user.set_password(password)  # invalide aussi les sessions ouvertes sur les autres appareils
         user.save(update_fields=['password'])
         OneTimeCode.objects.filter(user=user, purpose=otp.purpose, used_at__isnull=True).update(used_at=timezone.now())
-    open_session(request, user)
     send_in_background(send_password_changed_email, user)
+    if not user.can_connect:
+        return {'user': None, 'pending': True, 'message': PENDING_ACCESS_MESSAGE}
+    open_session(request, user)
     return {'user': user_private(user)}
 
 

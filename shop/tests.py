@@ -42,8 +42,8 @@ class ShopFlowTests(TestCase):
 
     def setUp(self):
         cache.clear()
-        self.seller = User.objects.create_user('vendeur', password='x', display_name='Awa Boutique')
-        self.buyer = User.objects.create_user('client', password='x', display_name='Koffi')
+        self.seller = User.objects.create_user('vendeur', password='x', display_name='Awa Boutique', can_connect=True)
+        self.buyer = User.objects.create_user('client', password='x', display_name='Koffi', can_connect=True)
         Subscription.objects.create(user=self.seller, expires_at=timezone.now() + timedelta(days=30))
         self.cs, self.cb = Client(), Client()
         self.cs.force_login(self.seller)
@@ -115,7 +115,7 @@ class ShopFlowTests(TestCase):
         self.assertEqual(Product.objects.get(pk=p['id']).sold_count, 2)
         # Un inconnu ne voit pas la commande.
         other = Client()
-        other.force_login(User.objects.create_user('curieux', password='x'))
+        other.force_login(User.objects.create_user('curieux', password='x', can_connect=True))
         self.assertEqual(other.get(f'/api/shop/orders/{oid}').status_code, 404)
 
     def test_cancel_after_accept_releases_stock_and_seller_can_confirm_delivery(self):
@@ -195,7 +195,7 @@ def signed(client, payload, event, secret='whsec_test', ts=None):
 class SubscriptionTests(TestCase):
     def setUp(self):
         cache.clear()
-        self.user = User.objects.create_user('vendeuse', password='x', email='awa@example.com', phone='0701020304')
+        self.user = User.objects.create_user('vendeuse', password='x', email='awa@example.com', phone='0701020304', can_connect=True)
         self.c = Client()
         self.c.force_login(self.user)
 

@@ -38,27 +38,44 @@ export async function startCall(peer, video) {
     try { stream = await getMedia(false); video = false; toast('Caméra indisponible : appel audio.'); }
     catch (e2) { return toast('Accès au micro refusé.', { type: 'error' }); }
   }
-  current = { role: 'caller', peer, video, localStream: stream, call: null, accepted: true, candidates: [] };
+  // `ref` : notre demande, renvoyée par le serveur (les événements d'un appel précédent sont ignorés).
+  const ref = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  current = { role: 'caller', peer, video, localStream: stream, call: null, ref, accepted: true, candidates: [] };
   initAudio();
   showCallUI('Appel en cours…');
-  send('call.start', { to: peer.id, video });
+  send('call.start', { to: peer.id, video, ref });
+  getIce();  // prêt dès le décroché : la connexion s'établit plus vite
+}
+
+// Accès au micro / à la caméra en cours : un appel entrant ne doit pas être refusé pour autant.
+function isLiveCall() {
+  return !!current && (current.role === 'caller' || current.accepted);
 }
 
 export function installCalls() {
-  bus.on('call.created', ({ call, callee_online }) => {
-    if (!current || current.call) return;
+  bus.on('call.created', ({ call, callee_online, ref, ring_timeout }) => {
+    if (!current || current.role !== 'caller' || current.call || current.ref !== ref) {
+      // Raccroché avant la confirmation du serveur : l'appel ne doit pas sonner dans le vide.
+      send('call.end', { call_id: call.id });
+      return;
+    }
     current.call = call;
     setStatus(callee_online ? 'Sonnerie…' : 'Appel en cours…');
     current.stopRing = ringback();
-    // Sans réponse au bout de 50 s : appel manqué. (Annulé dès que l'appel est décroché.)
-    current.timeout = setTimeout(() => { if (current && current.call && !current.answered) send('call.end', { call_id: current.call.id }); }, 50000);
+    // Le serveur déclare l'appel manqué à la fin de la sonnerie ; filet de sécurité côté client.
+    current.timeout = setTimeout(() => { if (current && current.call && !current.answered) send('call.end', { call_id: current.call.id }); }, ((ring_timeout || 45) + 5) * 1000);
   });
 
   bus.on('call.incoming', async ({ call }) => {
-    if (current) {
-      send('call.decline', { call_id: call.id });
+    if (current && current.call && current.call.id === call.id) return;  // même appel reçu deux fois
+    if (isLiveCall()) {
+      // Déjà en communication : « occupé » (et non « refusé ») pour l'appelant.
+      send('call.decline', { call_id: call.id, busy: true });
       return;
     }
+    // Une ancienne sonnerie restée affichée (sa fin s'est perdue) laisse place au nouvel appel.
+    if (current) cleanup();
+    getIce();
     current = { role: 'callee', peer: call.caller, video: call.video, call, accepted: false, candidates: [] };
     current.stopRing = ringtone();
     showIncomingUI();
@@ -107,10 +124,15 @@ export function installCalls() {
     } catch (e) { console.error('[call] signal', e); }
   });
 
-  bus.on('call.ended', ({ call, reason }) => {
+  bus.on('call.ended', ({ call, reason, ref }) => {
     if (!current) return;
-    if (current.call && current.call.id !== call.id) return;
-    if (!current.call && current.role === 'caller' && reason === 'busy') { toast(`${current.peer.name} est déjà en ligne.`); return cleanup(); }
+    if (!current.call) {
+      // Pas encore d'appel confirmé : seule la réponse « occupé » à NOTRE demande nous concerne
+      // (la fin d'un appel précédent, arrivée en retard, ne doit pas couper le nouvel appel).
+      if (current.role === 'caller' && reason === 'busy' && ref && ref === current.ref) { toast(`${current.peer.name} est déjà en ligne.`); cleanup(); }
+      return;
+    }
+    if (current.call.id !== call.id) return;
     const labels = { declined: 'Appel refusé', missed: current.role === 'caller' ? 'Pas de réponse' : 'Appel manqué', busy: 'Occupé', ended: 'Appel terminé' };
     toast(labels[reason] || 'Appel terminé');
     cleanup();
@@ -123,7 +145,10 @@ export function installCalls() {
   });
 
   bus.on('error', ({ message, for: forType }) => {
-    if (forType && forType.startsWith('call.')) { toast(message, { type: 'error' }); if (current && !current.call) cleanup(); }
+    if (!forType || !forType.startsWith('call.')) return;
+    toast(message, { type: 'error' });
+    // Demande d'appel refusée, ou décroché trop tard (l'appel n'existe plus) : on libère l'écran.
+    if (current && (!current.call || forType === 'call.accept')) cleanup();
   });
 
   window.addEventListener('beforeunload', () => { if (current && current.call) send('call.end', { call_id: current.call.id }); });

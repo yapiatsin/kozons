@@ -16,11 +16,12 @@ export function render(stage) {
     try {
       const groups = await fetchStories();
       const mine = groups.find(g => g.is_me);
-      const recent = groups.filter(g => !g.is_me && !g.all_seen);
-      const seen = groups.filter(g => !g.is_me && g.all_seen);
+      const recent = groups.filter(g => !g.is_me && !g.muted && !g.all_seen);
+      const seen = groups.filter(g => !g.is_me && !g.muted && g.all_seen);
+      const muted = groups.filter(g => !g.is_me && g.muted);
       const row = g => {
         const last = g.stories[g.stories.length - 1];
-        return h('button.status-row', { type: 'button', onclick: () => openViewer(groups, groups.indexOf(g), load) },
+        return h('button.status-row' + (g.muted ? '.muted-row' : ''), { type: 'button', onclick: () => openViewer(groups, groups.indexOf(g), load) },
           avatar(g.user.avatar, g.user.name, 52, { ring: g.all_seen ? 'seen' : 'new' }),
           h('div.grow', h('div.strong', g.is_me ? 'Mon statut' : g.user.name),
             h('div.muted.small', `${g.stories.length} mise${g.stories.length > 1 ? 's' : ''} à jour · ${ago(last.created_at)}`)));
@@ -31,6 +32,8 @@ export function render(stage) {
           h('div.grow', h('div.strong', 'Mon statut'), h('div.muted.small', 'Appuyez pour ajouter une mise à jour'))),
         recent.length ? [h('div.list-title', 'Récents'), recent.map(row)] : null,
         seen.length ? [h('div.list-title', 'Vus'), seen.map(row)] : null,
+        // « Masquer » (menu ⋮ de la visionneuse) : rangés à part, sans être lus à la suite des autres.
+        muted.length ? h('details.status-muted', h('summary.list-title', `Statuts masqués (${muted.length})`), muted.map(row)) : null,
         !recent.length && !seen.length ? empty('status', 'Aucune mise à jour', 'Les statuts de vos contacts et des comptes que vous suivez disparaissent après 24 heures.') : null);
     } catch (e) { errorToast(e); }
   }

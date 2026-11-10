@@ -29,8 +29,8 @@ class PushTests(TestCase):
     def setUp(self):
         cache.clear()
         presence.reset()
-        self.alice = User.objects.create_user('alice', password='x', display_name='Alice')
-        self.bob = User.objects.create_user('bob', password='x', display_name='Bob')
+        self.alice = User.objects.create_user('alice', password='x', display_name='Alice', can_connect=True)
+        self.bob = User.objects.create_user('bob', password='x', display_name='Bob', can_connect=True)
         self.ca, self.cb = Client(), Client()
         self.ca.force_login(self.alice)
         self.cb.force_login(self.bob)
@@ -113,6 +113,10 @@ class PushTests(TestCase):
         jpost(self.cb, 'push/subscribe', subscription())
         consumer = KozonsConsumer()
         consumer.user = self.alice
+        # Bob a l'application ouverte en arrière-plan (connectée) : l'appel lui est quand même notifié.
+        from accounts import presence
+        presence.register(self.bob.pk, 'onglet-en-arriere-plan')
+        self.addCleanup(presence.reset)
         with self.captureOnCommitCallbacks(execute=True):
             consumer._call_start({'to': self.bob.pk, 'video': True})
         ring = self.sent()[-1]

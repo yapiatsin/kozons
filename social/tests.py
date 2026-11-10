@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 
@@ -12,7 +13,7 @@ MEDIA = tempfile.mkdtemp()
 
 
 def make_user(username, **kw):
-    u = User.objects.create_user(username=username, password='secret123', **kw)
+    u = User.objects.create_user(username=username, password='secret123', **kw, can_connect=True)
     c = Client()
     c.force_login(u)
     return u, c
@@ -112,6 +113,156 @@ class SocialTests(TestCase):
         self.assertEqual(len(self.cb.get('/api/stories').json()['results'][0]['stories']), 2)
         Story.objects.update(expires_at='2000-01-01T00:00:00Z')
         self.assertEqual(self.cb.get('/api/stories').json()['results'], [])
+
+    def test_story_menu_mute_notify_report(self):
+        from unittest import mock
+        from social.models import StoryReport
+        jpost(self.cb, f'users/{self.alice.pk}/follow')
+        sid = self.ca.post('/api/stories', {'text': 'Premier'}).json()['id']
+        group = self.cb.get('/api/stories').json()['results'][0]
+        self.assertEqual((group['muted'], group['notify']), (False, False))
+        # « Masquer » puis « Recevoir les notifications » (menu ⋮ de la visionneuse).
+        self.assertEqual(jpost(self.cb, f'stories/prefs/{self.alice.pk}', {'muted': True}).json(), {'muted': True, 'notify': False})
+        self.assertTrue(self.cb.get('/api/stories').json()['results'][0]['muted'])
+        jpost(self.cb, f'stories/prefs/{self.alice.pk}', {'muted': False, 'notify': True})
+        self.assertEqual(jpost(self.ca, f'stories/prefs/{self.alice.pk}', {'muted': True}).status_code, 400)
+        # Nouveau statut : les abonnés aux notifications sont prévenus, même application ouverte.
+        with mock.patch('social.views.send_to_users') as sent:
+            self.ca.post('/api/stories', {'text': 'Second'})
+        self.assertEqual(set(sent.call_args.args[0]), {self.bob.pk})
+        self.assertEqual(sent.call_args.args[1]['kind'], 'story')
+        self.assertFalse(sent.call_args.kwargs['only_offline'])
+        # Signaler : le contenu est conservé pour la modération (une seule fois par personne).
+        self.assertTrue(jpost(self.cb, f'stories/{sid}', {'action': 'report', 'reason': 'spam'}).json()['reported'])
+        jpost(self.cb, f'stories/{sid}', {'action': 'report', 'reason': 'spam'})
+        report = StoryReport.objects.get()
+        self.assertEqual((report.author_id, report.reason, report.snapshot['text']), (self.alice.pk, 'spam', 'Premier'))
+
+
+def video(name='clip.mov'):
+    return SimpleUploadedFile(name, b'\x00\x00\x00\x18ftypqt  ' + b'0' * 256, content_type='video/quicktime')
+
+
+@override_settings(MEDIA_ROOT=MEDIA, KOZONS_STORY_ASYNC=False)
+class StoryVideoTests(TestCase):
+    """Vidéos de statut : conversion (MP4 720p, 90 s), publication une fois prête, quota, ménage."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.alice, self.ca = make_user('alice')
+        self.bob, self.cb = make_user('bob')
+        jpost(self.cb, f'users/{self.alice.pk}/follow')
+
+    def fake_transcode(self, src, out, poster, **kw):
+        with open(out, 'wb') as f:
+            f.write(b'mp4-720p')
+        with open(poster, 'wb') as f:
+            f.write(b'jpeg')
+        return True
+
+    def post_video(self):
+        return self.ca.post('/api/stories', {'file': video(), 'text': 'Le match !'})
+
+    def test_video_is_converted_then_published(self):
+        from unittest import mock
+        from social import storymedia
+        with mock.patch.object(storymedia, 'ffmpeg', return_value='ffmpeg'), \
+                mock.patch.object(storymedia, 'transcode', side_effect=self.fake_transcode) as tr, \
+                mock.patch.object(storymedia, 'probe_duration', return_value=125.0), \
+                mock.patch('chat.realtime.push') as push:
+            r = self.post_video()
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(r.json()['processing'])
+        story = Story.objects.get()
+        self.assertFalse(story.processing)
+        self.assertTrue(story.file.name.endswith('.mp4'))
+        self.assertTrue(story.poster.name.endswith('.jpg'))
+        self.assertEqual(story.duration, 90)  # coupée à 90 s
+        self.assertTrue(tr.call_args.args[0].endswith('.mov'))
+        events = {c.args[1]: c.args for c in push.call_args_list}
+        self.assertIn(self.bob.pk, events['story.new'][0])
+        self.assertIn('90 secondes', events['story.published'][2]['message'])
+        shown = self.cb.get('/api/stories').json()['results'][0]['stories'][0]
+        self.assertEqual((shown['kind'], shown['duration']), ('video', 90))
+        self.assertTrue(shown['poster'].endswith('.jpg'))
+
+    def test_chosen_sequence_and_mute(self):
+        from unittest import mock
+        from social import storymedia
+        with mock.patch.object(storymedia, 'ffmpeg', return_value='ffmpeg'),                 mock.patch.object(storymedia, 'transcode', side_effect=self.fake_transcode) as tr,                 mock.patch.object(storymedia, 'probe_duration', return_value=125.0),                 mock.patch('chat.realtime.push') as push:
+            r = self.ca.post('/api/stories', {'file': video(), 'trim_start': '10.5', 'trim_end': '25.5', 'mute': '1'})
+        self.assertTrue(r.json()['processing'])
+        self.assertEqual(tr.call_args.kwargs, {'start': 10.5, 'length': 15.0, 'mute': True})
+        self.assertEqual(Story.objects.get().duration, 15)
+        # Séquence choisie par la personne : pas d'avertissement « vidéo coupée ».
+        self.assertNotIn('story.published', [c.args[1] for c in push.call_args_list])
+        # Bornes incohérentes ou trop longues : 90 s au plus, depuis le début demandé.
+        self.assertEqual(storymedia.clip_bounds('5', '200'), (5.0, 90.0))
+        self.assertEqual(storymedia.clip_bounds('abc', None), (0.0, 90.0))
+        self.assertEqual(storymedia.clip_bounds('30', '20'), (30.0, 90.0))
+
+    def test_story_hidden_while_converting(self):
+        from unittest import mock
+        from social import storymedia
+        with mock.patch.object(storymedia, 'ffmpeg', return_value='ffmpeg'), \
+                mock.patch.object(storymedia, '_run_async') as later:
+            self.assertTrue(self.post_video().json()['processing'])
+        os.remove(later.call_args.args[2])  # fichier temporaire de la vidéo reçue
+        self.assertEqual(self.cb.get('/api/stories').json()['results'], [])
+        self.assertEqual(self.ca.get('/api/stories').json()['results'], [])
+
+    def test_failed_conversion_removes_story(self):
+        from unittest import mock
+        from social import storymedia
+        with mock.patch.object(storymedia, 'ffmpeg', return_value='ffmpeg'), \
+                mock.patch.object(storymedia, 'transcode', return_value=False), \
+                mock.patch.object(storymedia, 'probe_duration', return_value=None), \
+                mock.patch('chat.realtime.push') as push:
+            self.post_video()
+        self.assertFalse(Story.objects.exists())
+        self.assertEqual(push.call_args.args[:2], ([self.alice.pk], 'story.failed'))
+
+    def test_without_ffmpeg_video_is_published_as_is(self):
+        from unittest import mock
+        from social import storymedia
+        with mock.patch.object(storymedia, 'ffmpeg', return_value=None):
+            r = self.post_video()
+        self.assertNotIn('processing', r.json())
+        self.assertEqual(len(self.cb.get('/api/stories').json()['results'][0]['stories']), 1)
+
+    @override_settings(STORY_DAILY_LIMIT=2)
+    def test_daily_limit(self):
+        for text in ('un', 'deux'):
+            self.assertEqual(self.ca.post('/api/stories', {'text': text}).status_code, 200)
+        r = self.ca.post('/api/stories', {'text': 'trois'})
+        self.assertEqual(r.status_code, 429)
+        self.assertIn('2 statuts par 24 heures', r.json()['error'])
+
+    def test_purge_expired_files_but_keeps_reported(self):
+        from datetime import timedelta
+        from django.core.files.base import ContentFile
+        from django.utils import timezone
+        from social import storymedia
+        from social.models import StoryReport
+        past = timezone.now() - timedelta(hours=1)
+        old = Story.objects.create(user=self.alice, kind='video', expires_at=past)
+        old.file.save('old.mp4', ContentFile(b'x'))
+        old.poster.save('old.jpg', ContentFile(b'x'))
+        paths = [old.file.path, old.poster.path]
+        reported = Story.objects.create(user=self.alice, kind='text', text='signalé', expires_at=past)
+        report = StoryReport.objects.create(story=reported, author=self.alice, reporter=self.bob)
+        stuck = Story.objects.create(user=self.alice, kind='video', processing=True, created_at=timezone.now() - timedelta(hours=2))
+        alive = Story.objects.create(user=self.alice, kind='text', text='en cours')
+        self.assertEqual(storymedia.purge_expired(), 2)
+        self.assertEqual(set(Story.objects.values_list('pk', flat=True)), {reported.pk, alive.pk})
+        self.assertFalse(any(os.path.exists(p) for p in paths))
+        self.assertFalse(Story.objects.filter(pk=stuck.pk).exists())
+        # Signalement traité : le statut expiré peut partir à son tour.
+        report.handled = True
+        report.save()
+        self.assertEqual(storymedia.purge_expired(), 1)
+        self.assertEqual(list(Story.objects.values_list('pk', flat=True)), [alive.pk])
 
 
 class FriendSuggestionTests(TestCase):

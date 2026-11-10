@@ -186,9 +186,11 @@ def check_media_token(token, path, action):
 
 # ---------------------------------------------------------------- séances, présences, fin
 
-def mark_joined(meeting, user):
+def mark_joined(meeting, user, *, new_session=None):
     now = timezone.now()
-    if registry.count(meeting.pk) <= 1:
+    if new_session is None:
+        new_session = registry.count(meeting.pk) <= 1
+    if new_session:
         Meeting.objects.filter(pk=meeting.pk).update(started_at=now, ended_at=None)
     return MeetingAttendance.objects.create(meeting=meeting, user=user, joined_at=now)
 
@@ -200,12 +202,15 @@ def mark_left(meeting_id, user_id):
         att.save(update_fields=['left_at'])
 
 
-def close_session(meeting_id):
-    """Plus personne : fin de la séance, arrêt de la prise de notes (le compte rendu est rédigé)."""
+def close_session(meeting_id, *, keep_waiting=True):
+    """Plus personne : fin de la séance, arrêt de la prise de notes (le compte rendu est rédigé).
+
+    Les personnes en salle d'attente y restent (sauf « terminer pour tous ») : l'organisateur qui
+    revient les retrouve dans sa liste."""
     Meeting.objects.filter(pk=meeting_id).update(ended_at=timezone.now())
     MeetingAttendance.objects.filter(meeting_id=meeting_id, left_at__isnull=True).update(left_at=timezone.now())
     stop_notes(meeting_id)
-    registry.forget(meeting_id)
+    registry.forget(meeting_id, keep_waiting=keep_waiting)
 
 
 # ---------------------------------------------------------------- notes IA

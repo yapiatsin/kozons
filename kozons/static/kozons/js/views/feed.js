@@ -161,7 +161,7 @@ export function postCard(post, { onDeleted } = {}) {
 
 function quickComment(post) {
   const input = h('input.quick-comment', { placeholder: 'Ajouter un commentaire…', maxlength: 2200 });
-  const sendB = h('button.link.hidden', { type: 'button' }, 'Publier');
+  const sendB = h('button.link.hidden', { type: 'button', 'data-keep-focus': '' }, 'Publier');
   input.addEventListener('input', () => sendB.classList.toggle('hidden', !input.value.trim()));
   const submit = async () => {
     const text = input.value.trim();

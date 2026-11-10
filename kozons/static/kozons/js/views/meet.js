@@ -1,7 +1,7 @@
 // Kozons Meet : accueil (nouvelle réunion, rejoindre, agenda), salle d'attente / aperçu, notes IA.
 import { api } from '../api.js';
 import { bus, state } from '../store.js';
-import { send } from '../ws.js';
+import { send, TAB_ID } from '../ws.js';
 import { h, clear, icon, btn, avatar, menu, modal, toast, errorToast, confirmDialog, debounce, spinner, empty, timeHM } from '../ui.js';
 import { LocalMedia, devicesDialog } from './meetroom.js';
 
@@ -222,7 +222,7 @@ function renderMeeting(stage, rawCode, params) {
   const page = h('div.mt-lobby-page', h('div.center.pad', spinner()));
   stage.appendChild(page);
   const local = new LocalMedia();
-  let roomCleanup = null, closed = false, waitingFor = null, info = null;
+  let roomCleanup = null, closed = false, waitingFor = null, info = null, status = null, starting = false;
   const offs = [];
 
   const preview = h('video.mt-preview-video.mirror', { autoplay: true, playsinline: true, muted: true });
@@ -246,7 +246,8 @@ function renderMeeting(stage, rawCode, params) {
   offs.push(local.onChange(paintPreview));
 
   const side = h('div.mt-lobby-side');
-  const paintSide = (status = null) => {
+  const paintSide = (next = null) => {
+    status = next;
     if (!info) return;
     const present = info.present || [];
     const who = present.length === 0 ? 'Personne d’autre n’est là'
@@ -259,6 +260,9 @@ function renderMeeting(stage, rawCode, params) {
       action = h('div.mt-wait', spinner(26), h('p', 'Demande envoyée. Vous pourrez participer dès que quelqu’un dans la réunion vous y aura autorisé.'),
         waitingFor === false ? h('p.muted.small', "L'organisateur n'est pas encore là : il a été prévenu par notification.") : null,
         h('button.btn.ghost', { onclick: () => { send('meet.cancel_wait', { code: info.code }); paintSide(); } }, 'Annuler la demande'));
+    } else if (status === 'replaced') {
+      action = h('div', h('p.mt-warn', 'Vous avez rejoint cette réunion depuis un autre onglet ou appareil.'),
+        h('button.btn.primary', { onclick: () => join() }, 'Participer ici'));
     } else if (status === 'denied') {
       action = h('div', h('p.mt-warn', 'Quelqu’un dans l’appel a refusé votre demande de participation.'), h('button.btn.ghost', { onclick: () => go('/meet') }, "Revenir à l'accueil"));
     } else if (status === 'joining') action = h('div.mt-wait', spinner(26), h('p', 'Connexion…'));
@@ -280,12 +284,19 @@ function renderMeeting(stage, rawCode, params) {
 
   const join = () => {
     paintSide('joining');
-    send('meet.join', { code: info.code, mic: local.mic, cam: local.cam });
+    send('meet.join', { code: info.code, mic: local.mic, cam: local.cam, client: TAB_ID });
   };
+  // En attente (ou en cours d'entrée) et la connexion a été rétablie : la demande est renvoyée.
+  const resendIfPending = () => { if (info && !roomCleanup && !closed && (status === 'waiting' || status === 'joining')) send('meet.join', { code: info.code, mic: local.mic, cam: local.cam, client: TAB_ID }); };
 
   const showRoom = async joined => {
+    // Deux « meet.joined » rapprochés (double envoi, reconnexion) : une seule salle.
+    if (roomCleanup || closed || starting) return;
+    starting = true;
+    let startRoom;
+    try { ({ startRoom } = await import('./meetroom.js')); } finally { starting = false; }
     if (roomCleanup || closed) return;
-    const { startRoom } = await import('./meetroom.js');
+    status = 'in-room';
     const host = h('div.mt-room-host');
     clear(page, host);
     page.classList.add('in-room');
@@ -293,8 +304,10 @@ function renderMeeting(stage, rawCode, params) {
   };
 
   const leftScreen = (reason, extra) => {
+    status = 'left';  // plus de nouvelle tentative d'entrée automatique (reconnexion)
     page.classList.remove('in-room');
     const titles = { removed: 'Vous avez été retiré(e) de la réunion', ended: "L'organisateur a mis fin à la réunion", ended_by_me: 'Vous avez mis fin à la réunion pour tous',
+      replaced: 'Vous avez rejoint cette réunion depuis un autre onglet ou appareil',
       alone_timeout: 'La réunion a pris fin : vous étiez seul(e) et inactif(ve) depuis 15 minutes' };
     clear(page, h('div.mt-left',
       h('h2', titles[reason] || 'Vous avez quitté la réunion'),
@@ -309,7 +322,10 @@ function renderMeeting(stage, rawCode, params) {
   offs.push(
     bus.on('meet.joined', d => { if (info && d.meeting.id === info.id && !closed && !roomCleanup) showRoom(d); }),
     bus.on('meet.waiting', mine(d => { waitingFor = d.managers_present; paintSide('waiting'); })),
-    bus.on('meet.admitted', mine(() => send('meet.join', { code: info.code, mic: local.mic, cam: local.cam }))),
+    bus.on('meet.admitted', mine(() => send('meet.join', { code: info.code, mic: local.mic, cam: local.cam, client: TAB_ID }))),
+    bus.on('meet.replaced', mine(() => { if (!roomCleanup) paintSide('replaced'); })),
+    bus.on('meet.rejoin', mine(() => resendIfPending())),
+    bus.on('ws:reconnected', () => resendIfPending()),
     bus.on('meet.denied', mine(() => paintSide('denied'))),
     bus.on('meet.ended', mine(() => { if (!roomCleanup) paintSide('denied'); })),
     bus.on('error', e => { if (e && e.for === 'meet.join' && !roomCleanup && !closed) { toast(e.message, { type: 'error' }); paintSide(); } }),

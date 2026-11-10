@@ -22,9 +22,9 @@ class LiveApiTests(TestCase):
     def setUp(self):
         cache.clear()
         registry.reset()
-        self.host = User.objects.create_user('host', password='x', display_name='Animateur')
-        self.fan = User.objects.create_user('fan', password='x')
-        self.stranger = User.objects.create_user('stranger', password='x')
+        self.host = User.objects.create_user('host', password='x', display_name='Animateur', can_connect=True)
+        self.fan = User.objects.create_user('fan', password='x', can_connect=True)
+        self.stranger = User.objects.create_user('stranger', password='x', can_connect=True)
         self.ch, self.cf, self.cs = Client(), Client(), Client()
         self.ch.force_login(self.host)
         self.cf.force_login(self.fan)
@@ -109,8 +109,8 @@ class LiveRealtimeTests(TransactionTestCase):
 
     async def test_full_live_session(self):
         registry.reset()
-        host = await sync_to_async(User.objects.create_user)('host', password='x')
-        fan = await sync_to_async(User.objects.create_user)('fan', password='x')
+        host = await sync_to_async(User.objects.create_user)('host', password='x', can_connect=True)
+        fan = await sync_to_async(User.objects.create_user)('fan', password='x', can_connect=True)
         live = await sync_to_async(LiveStream.objects.create)(host=host, title='Test')
         wh, wf = await self.connect(host), await self.connect(fan)
 

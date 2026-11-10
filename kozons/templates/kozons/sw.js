@@ -10,6 +10,7 @@ self.addEventListener('push', event => {
   try { data = event.data ? event.data.json() : {}; }
   catch (e) { data = { title: 'Kozons', body: event.data ? event.data.text() : '' }; }
   const isCall = data.kind === 'call';
+  const callRelated = isCall || data.kind === 'missed_call';
   const options = {
     body: data.body || '',
     icon: data.icon || ICON,
@@ -22,12 +23,18 @@ self.addEventListener('push', event => {
     data: { url: data.url || '/', kind: data.kind },
     actions: isCall ? [{ action: 'open', title: 'Répondre' }] : [],
   };
-  // Le navigateur exige d'afficher une notification pour chaque push reçu.
-  event.waitUntil(Promise.all([
-    self.registration.showNotification(data.title || 'Kozons', options),
-    setBadge(data.badge),
-  ]));
+  // Le navigateur exige d'afficher une notification pour chaque push reçu… sauf si Kozons est à
+  // l'écran : un appel y sonne déjà (et « appel manqué » s'y affiche), pas de doublon.
+  event.waitUntil((async () => {
+    if (callRelated && await appVisible()) return setBadge(data.badge);
+    await Promise.all([self.registration.showNotification(data.title || 'Kozons', options), setBadge(data.badge)]);
+  })());
 });
+
+async function appVisible() {
+  const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  return list.some(c => c.visibilityState === 'visible' && c.focused !== false);
+}
 
 // Pastille sur l'icône de l'application installée (nombre de discussions et notifications non lues).
 function setBadge(n) {

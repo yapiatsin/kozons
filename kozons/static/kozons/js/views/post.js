@@ -234,7 +234,7 @@ function commentsBlock(post, onChange) {
   };
   load();
 
-  const publish = h('button.pin-publish', { type: 'button', disabled: true }, 'Publier');
+  const publish = h('button.pin-publish', { type: 'button', disabled: true, 'data-keep-focus': '' }, 'Publier');
   input.addEventListener('input', () => { publish.disabled = !input.value.trim(); });
   const submit = async () => {
     const text = input.value.trim();

@@ -152,6 +152,12 @@ superuser: ## Crée un compte administrateur
 check: ## Vérifications Django de production
 	$(DJANGO) check --deploy
 
+purge-stories: ## Supprime les statuts expirés et leurs fichiers (aussi fait automatiquement)
+	$(DJANGO) purge_stories
+
+check-story-video: ## Teste la conversion des vidéos de statut (vidéo générée, rien n'est publié)
+	$(DJANGO) check_story_video
+
 backup: ## Sauvegarde PostgreSQL dans backups/ (dump compressé)
 	@mkdir -p backups
 	$(COMPOSE) exec -T $(DB) sh -c 'pg_dump -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -Fc -f /backups/kozons-$$(date +%Y%m%d-%H%M%S).dump'

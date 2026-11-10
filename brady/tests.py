@@ -32,7 +32,7 @@ async def read_events(response):
 class BradyTests(TransactionTestCase):
     async def asyncSetUp(self):
         await sync_to_async(cache.clear)()
-        self.user = await sync_to_async(User.objects.create_user)('awa', password='x')
+        self.user = await sync_to_async(User.objects.create_user)('awa', password='x', can_connect=True)
         self.client = AsyncClient()
         await self.client.aforce_login(self.user)
 
@@ -78,8 +78,8 @@ class BradyTests(TransactionTestCase):
 
 class BradyThreadsTests(TransactionTestCase):
     def test_threads_are_private(self):
-        awa = User.objects.create_user('awa', password='x')
-        koffi = User.objects.create_user('koffi', password='x')
+        awa = User.objects.create_user('awa', password='x', can_connect=True)
+        koffi = User.objects.create_user('koffi', password='x', can_connect=True)
         t = Thread.objects.create(user=awa, title='Idée de podcast')
         Message.objects.create(thread=t, role='user', content='Une idée de podcast ?')
         ca, ck = Client(), Client()
@@ -94,6 +94,6 @@ class BradyThreadsTests(TransactionTestCase):
         self.assertFalse(Thread.objects.exists())
 
     def test_history_starts_with_user(self):
-        t = Thread.objects.create(user=User.objects.create_user('a', password='x'))
+        t = Thread.objects.create(user=User.objects.create_user('a', password='x', can_connect=True))
         msgs = [Message(thread=t, role='assistant', content='…'), Message(thread=t, role='user', content='Salut')]
         self.assertEqual(ai.build_messages(msgs), [{'role': 'user', 'content': 'Salut'}])
