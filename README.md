@@ -1,81 +1,108 @@
 # Kozons
 
-Messagerie en temps réel + réseau social (inspiré de WhatsApp et Instagram), en Django + Channels
-avec une interface web monopage en JavaScript pur (sans étape de build).
+Réseau social façon WhatsApp / Instagram. Le dépôt contient deux projets :
 
-## Démarrer
-
-```bash
-env\Scripts\python.exe -m pip install -r requirements.txt
-env\Scripts\python.exe manage.py migrate
-env\Scripts\python.exe manage.py runserver 127.0.0.1:8010
+```
+kozons/
+├── KozonWeb/          Application web Django + API JSON (déployée sur le VPS)
+│   ├── manage.py
+│   ├── koz/           Réglages Django, ASGI (Daphne + Channels)
+│   ├── accounts/  chat/  social/  live/  meet/  brady/  shop/
+│   ├── kozons/        Front SPA (static/kozons/js) + routes de l'API (urls_api.py)
+│   ├── Dockerfile  docker-compose.yml  Makefile  caddy/  docker/
+│   ├── requirements.txt  .env.example  .env.prod.example
+│   └── (non suivis) .env  env/  media/  db.sqlite3  backups/
+├── Kozonmobile/       Application mobile Flutter (Android / iOS), cliente de l'API
+│   ├── lib/config/api_config.dart   Adresse de l'API (local / production)
+│   └── lib/main.dart
+├── .claude/launch.json  Serveur de dev (prévisualisation dans Claude Code)
+└── README.md
 ```
 
-Ouvrez http://127.0.0.1:8010 et créez un compte (ou utilisez les comptes de démo `alice`, `bob`,
-`carol` — mot de passe `kozons123` — s'ils existent dans votre base).
+Les API utilisées par le mobile s'écrivent dans **KozonWeb** : JSON sous `/api/`
+(`KozonWeb/kozons/urls_api.py`), temps réel sous `/ws/`, fichiers sous `/media/`.
 
-Tests : `env\Scripts\python.exe manage.py test`
+## Lancer le web (KozonWeb)
 
-## Fonctionnalités
+Depuis `KozonWeb/` :
 
-**Messagerie (WhatsApp)**
-- Discussions privées et groupes (jusqu'à 1024 membres), admins, ajout/retrait, sortie de groupe
-- Temps réel par WebSocket : nouveaux messages, « écrit… » / « enregistre un audio… », en ligne / vu à
-- Accusés ✓ envoyé, ✓✓ distribué, ✓✓ bleu lu (désactivables), infos du message (qui a lu)
-- Texte enrichi (*gras*, _italique_, ~barré~, `code`, liens), emojis, grands emojis
-- Photos, vidéos, documents, audio, messages vocaux (pause, vitesse 1×/1,5×/2×), position, contact, sondages
-- Médias à vue unique, messages éphémères (24 h / 7 j / 90 j)
-- Répondre (citation), transférer, modifier (15 min), supprimer pour moi / pour tous, réactions, messages importants
-- Épingler, archiver, sourdine, marquer non lu, vider la discussion, recherche dans les messages
-- Glisser-déposer et coller des fichiers, envoi optimiste avec progression et « Réessayer » en cas d'échec
-- Blocage de contacts, confidentialité (vu à, photo de profil, confirmations de lecture)
-- Appels audio et vidéo 1-à-1 (WebRTC) : sonnerie, micro/caméra, changer de caméra, partage d'écran,
-  passage audio → vidéo, historique des appels (manqués, entrants, sortants)
+```powershell
+cd KozonWeb
+env\Scripts\python.exe manage.py migrate
+env\Scripts\python.exe manage.py runserver 127.0.0.1:8030
+```
 
-**Social (Instagram)**
-- Fil d'actualité, publications multi-photos/vidéos (carrousel), double-tap pour aimer
-- Commentaires avec réponses et J'aime, mentions @ et #hashtags, enregistrements, archives
-- Reels (défilement vertical, lecture auto), Explorer avec recherche
-- Profils, abonnés/abonnements, comptes privés avec demandes d'abonnement, suggestions
-- Stories / Statuts 24 h (photo, vidéo, texte coloré), amis proches, vues, J'aime, réponses en message privé
-- Notifications en temps réel, partage de publications en discussion
+Puis http://127.0.0.1:8030. Tests : `env\Scripts\python.exe manage.py test`.
 
-**Robustesse**
-- Reconnexion WebSocket automatique avec backoff + rattrapage des messages manqués
-- Pagination par curseur, requêtes groupées (liste des discussions en nombre constant de requêtes)
-- Limitation de débit (connexion, inscription, envois), contrôle d'accès sur chaque ressource
-- Fichiers dangereux refusés (html, svg, js, exe…), CSRF, sessions, SQLite en mode WAL
-- Thème clair/sombre, responsive mobile, installable (PWA), notifications du navigateur
+**Recréer le virtualenv** (nouveau poste, ou si `env\` est cassé — il a été déplacé avec
+le reste, et les lanceurs `.exe` secondaires gardent l'ancien chemin) :
 
-## Architecture
+```powershell
+cd KozonWeb
+Remove-Item -Recurse -Force env
+py -3.14 -m venv env
+env\Scripts\python.exe -m pip install -r requirements.txt
+```
 
-| Dossier | Rôle |
-|---|---|
-| `accounts/` | Utilisateur personnalisé, blocage, profil, confidentialité |
-| `chat/` | Discussions, messages, reçus, appels ; `consumers.py` = WebSocket, `services.py` = logique métier |
-| `social/` | Publications, commentaires, abonnements, stories, notifications |
-| `kozons/` | Coque de l'application, routes API, fichiers statiques (`static/kozons/js/views/*`) |
+`.env` (modèle `.env.example`) est lu dans `KozonWeb/`. Détails fonctionnels : [KozonWeb/README.md](KozonWeb/README.md).
 
-## Configuration (.env)
+## Lancer le mobile (Kozonmobile)
 
-La configuration est lue dans `.env` (modèle : `.env.example`) : `SECRET_KEY`, `DEBUG`,
-`ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`, les paramètres SMTP (`EMAIL_*`, `DEFAULT_FROM_EMAIL`) et
-`PASSWORD_RESET_OTP_MINUTES`. Ne jamais commiter `.env`.
+Flutter 3.44+ requis. Depuis `Kozonmobile/` :
 
-**Mot de passe oublié** : l'utilisateur saisit son e-mail ou son nom d'utilisateur, reçoit un code
-à 6 chiffres par e-mail (valable 10 min, 5 essais, 1 envoi par minute), puis choisit un nouveau mot
-de passe ; les autres appareils sont déconnectés et un e-mail de confirmation est envoyé.
-Les mots de passe exigent 8 caractères, une majuscule, une minuscule et un chiffre.
+```powershell
+cd Kozonmobile
+flutter pub get
+flutter run                                  # API locale (KozonWeb sur le port 8030)
+flutter run --dart-define=KOZONS_ENV=prod    # API de production https://kozonstic.com
+```
 
-## Production
+En local, l'émulateur Android joint le PC via `http://10.0.2.2:8030`, le simulateur iOS via
+`http://127.0.0.1:8030`. Autre adresse : `--dart-define=KOZONS_API_URL=http://IP:8030`.
+Détails : [Kozonmobile/README.md](Kozonmobile/README.md).
 
-- Dans `.env` : `DEBUG=False`, une vraie `SECRET_KEY`, `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`
-- Plusieurs processus : `pip install channels-redis` et `KOZONS_REDIS_URL=redis://…`
-- Appels hors réseau local : serveur TURN (`KOZONS_TURN_URL`, `KOZONS_TURN_USER`, `KOZONS_TURN_PASSWORD`)
-- HTTPS obligatoire pour micro/caméra hors localhost ; servir `/media/` par nginx ; PostgreSQL recommandé
+À savoir pour la suite : l'API authentifie aujourd'hui par **cookie de session Django + jeton CSRF**
+(comme le front web). Le client mobile devra conserver ces cookies, ou KozonWeb devra exposer une
+authentification par jeton dédiée au mobile.
 
-## Pas encore implémenté
+## Déploiement sur le VPS
 
-- Chiffrement de bout en bout (protocole Signal) — les messages sont protégés par contrôle d'accès, pas chiffrés côté client
-- Appels de groupe, notifications push navigateur fermé (Web Push/VAPID), applications mobiles natives
-- Communautés/chaînes WhatsApp, messages programmés, traduction, filtres photo
+Le dépôt reste cloné dans `/opt/kozons`, mais **toutes les commandes `make` se lancent désormais
+depuis `/opt/kozons/KozonWeb`**. Le Caddy partagé (`eprinters_caddy`), les dossiers
+`/srv/apps/kozons/{media,static}` et les conteneurs `kozons-*` ne changent pas.
+Le projet Docker Compose garde le nom `kozons` (fixé par `name: kozons` dans `docker-compose.yml`),
+donc la base PostgreSQL existante (volume `kozons_pgdata`) est réutilisée.
+
+### Déploiement courant
+
+```bash
+cd /opt/kozons/KozonWeb
+make rebuild      # git pull + build + redémarrage + Caddy
+make migrate      # si des migrations sont en attente
+```
+
+### ⚠ Première fois après la réorganisation (à faire à la main, une seule fois)
+
+`git pull` déplace les fichiers suivis, mais **pas** les fichiers non suivis du serveur :
+`.env` et `backups/` restent dans `/opt/kozons` et doivent être déplacés dans `KozonWeb/`.
+
+```bash
+cd /opt/kozons
+make backup                      # par prudence, avec l'ancien Makefile, AVANT le pull
+git pull --ff-only               # les fichiers passent dans KozonWeb/
+mv .env KozonWeb/.env            # obligatoire : sinon make rebuild s'arrête
+[ -d backups ] && mv backups KozonWeb/backups   # sauvegardes PostgreSQL (make backup/restore)
+cd KozonWeb
+docker compose config | head -1   # doit afficher : name: kozons
+make rebuild
+make migrate
+```
+
+Points d'attention :
+
+- **Ne pas lancer `docker compose` depuis `/opt/kozons`** : il n'y a plus de `docker-compose.yml` à la racine.
+- `media/` n'a rien à déplacer en production : les fichiers envoyés sont dans `/srv/apps/kozons/media`
+  (chemin absolu, monté par Docker et servi par Caddy).
+- `make rebuild` vérifie que `.env` est bien dans `KozonWeb/` et prévient s'il est resté dans `/opt/kozons`.
+- Les anciens conteneurs sont repris tels quels (mêmes noms `kozons-*`, même projet `kozons`) ;
+  aucune donnée n'est recréée.

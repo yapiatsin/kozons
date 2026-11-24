@@ -1,0 +1,489 @@
+import json
+import shutil
+import tempfile
+
+from asgiref.sync import sync_to_async
+from channels.testing import WebsocketCommunicator
+from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import Client, TransactionTestCase, override_settings
+
+from accounts.models import User
+from chat.models import Message, Participant
+
+MEDIA = tempfile.mkdtemp()
+
+
+def make_user(username, **kw):
+    u = User.objects.create_user(username=username, password='secret123', **kw, can_connect=True)
+    c = Client()
+    c.force_login(u)
+    return u, c
+
+
+def post(client, url, data=None, **kw):
+    if data is not None and not kw.get('multipart'):
+        return client.post('/api/' + url, json.dumps(data), content_type='application/json')
+    return client.post('/api/' + url, data or {})
+
+
+@override_settings(MEDIA_ROOT=MEDIA)
+class ChatApiTests(TransactionTestCase):
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(MEDIA, ignore_errors=True)
+
+    def setUp(self):
+        cache.clear()  # compteurs de limitation de débit
+        self.alice, self.ca = make_user('alice', display_name='Alice')
+        self.bob, self.cb = make_user('bob', display_name='Bob')
+        self.carol, self.cc = make_user('carol')
+
+    def direct(self):
+        r = post(self.ca, 'conversations/direct', {'user_id': self.bob.pk})
+        self.assertEqual(r.status_code, 200, r.content)
+        return r.json()['id']
+
+    def test_auth_flow(self):
+        c = Client()
+        r = post(c, 'auth/register', {'username': 'dave', 'password': 'Motdepasse1', 'email': 'dave@example.com'})
+        self.assertEqual(r.status_code, 200)
+        # Nouveau compte : en attente d'autorisation (can_connect=False), pas de session ouverte.
+        self.assertIsNone(c.get('/api/me').json()['user'])
+        User.objects.filter(username='dave').update(can_connect=True)
+        r = post(c, 'auth/login', {'username': 'dave', 'password': 'Motdepasse1'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(c.get('/api/me').json()['user']['username'], 'dave')
+        r = post(Client(), 'auth/register', {'username': 'dave', 'password': 'Motdepasse1', 'email': 'dave@example.com'})
+        self.assertEqual(r.status_code, 400)
+        r = post(Client(), 'auth/login', {'username': 'dave', 'password': 'mauvais'})
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(Client().get('/api/conversations').status_code, 401)
+
+    def test_direct_is_unique(self):
+        a = self.direct()
+        b = post(self.cb, 'conversations/direct', {'user_id': self.alice.pk}).json()['id']
+        self.assertEqual(a, b)
+
+    def test_send_read_and_unread_counts(self):
+        cid = self.direct()
+        for i in range(3):
+            r = post(self.ca, f'conversations/{cid}/messages', {'text': f'salut {i}'})
+            self.assertEqual(r.status_code, 200, r.content)
+        convs = self.cb.get('/api/conversations').json()['results']
+        self.assertEqual(convs[0]['unread'], 3)
+        self.assertEqual(convs[0]['last_message']['text'], 'salut 2')
+        last = convs[0]['last_message']['id']
+        post(self.cb, f'conversations/{cid}/read', {'message_id': last})
+        self.assertEqual(self.cb.get('/api/conversations').json()['results'][0]['unread'], 0)
+        alice_view = self.ca.get(f'/api/conversations/{cid}').json()
+        bob_part = next(p for p in alice_view['participants'] if p['user']['id'] == self.bob.pk)
+        self.assertEqual(bob_part['last_read_id'], last)
+
+    def test_outsider_cannot_read(self):
+        cid = self.direct()
+        self.assertEqual(self.cc.get(f'/api/conversations/{cid}/messages').status_code, 404)
+        self.assertEqual(post(self.cc, f'conversations/{cid}/messages', {'text': 'intrus'}).status_code, 404)
+
+    def test_pagination(self):
+        cid = self.direct()
+        conv_msgs = [Message(conversation_id=cid, sender=self.alice, text=str(i)) for i in range(120)]
+        Message.objects.bulk_create(conv_msgs)
+        r = self.cb.get(f'/api/conversations/{cid}/messages').json()
+        self.assertEqual(len(r['results']), 50)
+        self.assertTrue(r['has_more'])
+        self.assertEqual(r['results'][-1]['text'], '119')
+        older = self.cb.get(f'/api/conversations/{cid}/messages?before={r["results"][0]["id"]}').json()
+        self.assertEqual(older['results'][-1]['text'], '69')
+
+    def test_edit_delete_react_star(self):
+        cid = self.direct()
+        mid = post(self.ca, f'conversations/{cid}/messages', {'text': 'bonjour'}).json()['id']
+        self.assertEqual(post(self.cb, f'messages/{mid}/edit', {'text': 'pirate'}).status_code, 403)
+        self.assertEqual(post(self.ca, f'messages/{mid}/edit', {'text': 'bonsoir'}).status_code, 200)
+        post(self.cb, f'messages/{mid}/react', {'emoji': '❤️'})
+        post(self.cb, f'messages/{mid}/star')
+        msg = self.cb.get(f'/api/conversations/{cid}/messages').json()['results'][-1]
+        self.assertEqual(msg['text'], 'bonsoir')
+        self.assertEqual(msg['reactions'], [{'user_id': self.bob.pk, 'emoji': '❤️'}])
+        self.assertTrue(msg['starred'])
+        self.assertEqual(post(self.cb, f'messages/{mid}/delete', {'scope': 'everyone'}).status_code, 403)
+        post(self.cb, f'messages/{mid}/delete', {'scope': 'me'})
+        self.assertEqual(self.cb.get(f'/api/conversations/{cid}/messages').json()['results'], [])
+        post(self.ca, f'messages/{mid}/delete', {'scope': 'everyone'})
+        msg = self.ca.get(f'/api/conversations/{cid}/messages').json()['results'][-1]
+        self.assertTrue(msg['deleted'])
+        self.assertEqual(msg['text'], '')
+
+    def test_block(self):
+        cid = self.direct()
+        post(self.cb, f'users/{self.alice.pk}/block')
+        r = post(self.ca, f'conversations/{cid}/messages', {'text': 'hello'})
+        self.assertEqual(r.status_code, 403)
+        post(self.cb, f'users/{self.alice.pk}/block')  # débloque
+        self.assertEqual(post(self.ca, f'conversations/{cid}/messages', {'text': 'hello'}).status_code, 200)
+
+    def test_group_permissions(self):
+        r = post(self.ca, 'conversations/group', {'title': 'Équipe', 'member_ids': [self.bob.pk]})
+        self.assertEqual(r.status_code, 200, r.content)
+        gid = r.json()['id']
+        self.assertEqual(post(self.cb, f'conversations/{gid}/members', {'action': 'add', 'member_ids': [self.carol.pk]}).status_code, 403)
+        post(self.ca, f'conversations/{gid}/members', {'action': 'add', 'member_ids': [self.carol.pk]})
+        self.assertTrue(Participant.objects.filter(conversation_id=gid, user=self.carol).exists())
+        post(self.ca, f'conversations/{gid}/update', {'only_admins_can_send': True})
+        self.assertEqual(post(self.cc, f'conversations/{gid}/messages', {'text': 'x'}).status_code, 403)
+        post(self.ca, f'conversations/{gid}/members', {'action': 'promote', 'member_ids': [self.carol.pk]})
+        self.assertEqual(post(self.cc, f'conversations/{gid}/messages', {'text': 'x'}).status_code, 200)
+        # Le dernier admin qui part transmet ses droits.
+        post(self.cc, f'conversations/{gid}/members', {'action': 'demote', 'member_ids': [self.carol.pk]})
+        post(self.ca, f'conversations/{gid}/members', {'action': 'leave'})
+        self.assertTrue(Participant.objects.filter(conversation_id=gid, role='admin').exists())
+
+    def test_poll(self):
+        cid = self.direct()
+        r = self.ca.post(f'/api/conversations/{cid}/messages', {'kind': 'poll', 'text': 'Pizza ?', 'options': ['Oui', 'Non']})
+        self.assertEqual(r.status_code, 200, r.content)
+        msg = r.json()
+        opt = msg['poll']['options'][0]['id']
+        post(self.cb, f'messages/{msg["id"]}/vote', {'option_id': opt})
+        poll = self.ca.get(f'/api/conversations/{cid}/messages').json()['results'][-1]['poll']
+        self.assertEqual(poll['options'][0]['votes'], [self.bob.pk])
+
+    def test_file_upload_and_view_once(self):
+        cid = self.direct()
+        png = SimpleUploadedFile('photo.png', b'\x89PNG\r\n\x1a\n' + b'0' * 100, content_type='image/png')
+        r = self.ca.post(f'/api/conversations/{cid}/messages', {'file': png, 'view_once': '1'})
+        self.assertEqual(r.status_code, 200, r.content)
+        msg = r.json()
+        self.assertEqual(msg['kind'], 'image')
+        bob_msg = self.cb.get(f'/api/conversations/{cid}/messages').json()['results'][-1]
+        self.assertIsNone(bob_msg['file'])  # caché jusqu'à l'ouverture
+        self.assertEqual(post(self.cb, f'messages/{msg["id"]}/open').status_code, 200)
+        self.assertEqual(post(self.cb, f'messages/{msg["id"]}/open').status_code, 410)
+        bad = SimpleUploadedFile('x.html', b'<script>', content_type='text/html')
+        self.assertEqual(self.ca.post(f'/api/conversations/{cid}/messages', {'file': bad}).status_code, 400)
+
+    def test_voice_message_converted_with_waveform(self):
+        # Vocal Android (WebM) : converti en AAC lisible partout, forme d'onde et durée exactes du serveur.
+        import array
+        from unittest import mock
+
+        from django.core.files.base import ContentFile
+
+        from chat import audio
+        cid = self.direct()
+        webm = lambda: SimpleUploadedFile('vocal-1.webm', b'WEBM' + b'0' * 200, content_type='audio/webm')
+        with mock.patch.object(audio, 'convert_voice', return_value=(ContentFile(b'm4a', name='vocal-1.m4a'), 'AZf' * 16, 12.4)):
+            r = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'voice', 'duration': '11.0', 'waveform': 'B' * 48})
+        msg = r.json()
+        self.assertEqual((msg['kind'], msg['duration'], msg['waveform']), ('voice', 12.4, 'AZf' * 16))
+        self.assertTrue(msg['file'].endswith('.m4a'))
+        # Sans ffmpeg : fichier d'origine gardé, forme d'onde du navigateur acceptée si bien formée.
+        with mock.patch.object(audio, 'ffmpeg', return_value=None):
+            ok = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'voice', 'waveform': 'Af' * 24}).json()
+            bad = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'voice', 'waveform': '<script>'}).json()
+        self.assertEqual((ok['waveform'], bad['waveform']), ('Af' * 24, ''))
+        self.assertTrue(ok['file'].endswith('.webm'))
+        # Forme d'onde calculée depuis le son brut : 48 barres, la plus forte au maximum.
+        pcm = array.array('h', [0] * 4000 + [20000] * 4000).tobytes()
+        wave = audio.waveform_from_pcm(pcm)
+        self.assertEqual((len(wave), wave[0], wave[-1]), (48, 'A', 'f'))
+
+    def test_video_note_converted_to_mp4(self):
+        # Note vidéo (bulle ronde) : convertie en MP4 lisible partout, durée plafonnée à 60 s.
+        from unittest import mock
+
+        from django.core.files.base import ContentFile
+
+        from chat import videonote
+        from chat.services import push_preview
+        cid = self.direct()
+        webm = lambda: SimpleUploadedFile('Kozons-VID-1.webm', b'WEBM' + b'0' * 200, content_type='video/webm')
+        with mock.patch.object(videonote, 'convert_video_note', return_value=ContentFile(b'mp4', name='Kozons-VID-1.mp4')):
+            r = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'video_note', 'duration': '75.5'})
+        self.assertEqual(r.status_code, 200, r.content)
+        msg = r.json()
+        self.assertEqual((msg['kind'], msg['duration']), ('video_note', 60))
+        self.assertTrue(msg['file'].endswith('.mp4'))
+        self.assertEqual(push_preview(Message.objects.get(pk=msg['id'])), '📹 Note vidéo')
+        # Sans ffmpeg : fichier d'origine gardé. Une vidéo ordinaire reste une vidéo ; un document ne devient pas une note.
+        with mock.patch.object(videonote, 'ffmpeg', return_value=None):
+            raw = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm(), 'kind': 'video_note', 'duration': 'abc'}).json()
+        self.assertEqual((raw['kind'], raw['duration']), ('video_note', 0))
+        self.assertTrue(raw['file'].endswith('.webm'))
+        plain = self.ca.post(f'/api/conversations/{cid}/messages', {'file': webm()}).json()
+        self.assertEqual(plain['kind'], 'video')
+        pdf = SimpleUploadedFile('doc.pdf', b'%PDF-1.4', content_type='application/pdf')
+        self.assertEqual(self.ca.post(f'/api/conversations/{cid}/messages', {'file': pdf, 'kind': 'video_note'}).json()['kind'], 'file')
+
+    def test_forward_and_search(self):
+        cid = self.direct()
+        other = post(self.ca, 'conversations/direct', {'user_id': self.carol.pk}).json()['id']
+        mid = post(self.ca, f'conversations/{cid}/messages', {'text': 'réunion demain 10h'}).json()['id']
+        self.assertEqual(post(self.ca, f'messages/{mid}/forward', {'conversation_ids': [other]}).status_code, 200)
+        fwd = self.cc.get(f'/api/conversations/{other}/messages').json()['results'][-1]
+        self.assertTrue(fwd['forwarded'])
+        hits = self.cc.get('/api/messages/search?q=réunion').json()['results']
+        self.assertEqual(len(hits), 1)  # Carol ne voit pas la discussion Alice-Bob
+
+    def test_jump_to_date(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        cid = self.direct()
+        old = post(self.ca, f'conversations/{cid}/messages', {'text': 'il y a une semaine'}).json()['id']
+        Message.objects.filter(pk=old).update(created_at=timezone.now() - timedelta(days=7))
+        recent = post(self.ca, f'conversations/{cid}/messages', {'text': "aujourd'hui"}).json()['id']
+        day = (timezone.now() - timedelta(days=8)).date().isoformat()
+        res = self.cb.get(f'/api/conversations/{cid}/messages?date={day}').json()
+        self.assertEqual(res['target'], old)  # premier message à partir de cette date
+        self.assertIn(recent, [m['id'] for m in res['results']])
+        future = (timezone.now() + timedelta(days=3)).date().isoformat()
+        self.assertEqual(self.cb.get(f'/api/conversations/{cid}/messages?date={future}').json()['target'], recent)
+        self.assertEqual(self.cb.get(f'/api/conversations/{cid}/messages?date=pas-une-date').status_code, 400)
+
+    def test_disappearing(self):
+        cid = self.direct()
+        post(self.ca, f'conversations/{cid}/update', {'disappearing_seconds': 86400})
+        m = post(self.ca, f'conversations/{cid}/messages', {'text': 'éphémère'}).json()
+        self.assertIsNotNone(m['expires_at'])
+        Message.objects.filter(pk=m['id']).update(expires_at='2000-01-01T00:00:00Z')
+        texts = [x['text'] for x in self.cb.get(f'/api/conversations/{cid}/messages').json()['results']]
+        self.assertNotIn('éphémère', texts)
+
+
+class ConsumerTests(TransactionTestCase):
+    async def test_realtime_message_typing_and_call(self):
+        alice = await sync_to_async(User.objects.create_user)('alice', password='secret123', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='secret123', can_connect=True)
+
+        # On attache l'utilisateur au scope directement (sans cookie de session).
+        from chat.consumers import KozonsConsumer
+
+        async def connect_direct(user):
+            comm = WebsocketCommunicator(KozonsConsumer.as_asgi(), '/ws/')
+            comm.scope['user'] = user
+            ok, _ = await comm.connect()
+            self.assertTrue(ok)
+            return comm
+
+        wa = await connect_direct(alice)
+        wb = await connect_direct(bob)
+
+        from chat import services
+        conv = await sync_to_async(services.get_or_create_direct)(alice, bob)
+        await sync_to_async(services.create_message)(conv, alice, kind='text', text='yo')
+        evt = await wb.receive_json_from(timeout=2)
+        while evt['type'] != 'message.new':
+            evt = await wb.receive_json_from(timeout=2)
+        self.assertEqual(evt['data']['text'], 'yo')
+
+        await wb.send_json_to({'type': 'typing', 'conversation_id': conv.pk, 'state': 'typing'})
+        evt = await wa.receive_json_from(timeout=2)
+        while evt['type'] != 'typing':
+            evt = await wa.receive_json_from(timeout=2)
+        self.assertEqual(evt['data']['user_id'], bob.pk)
+
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'video': True})
+        got_incoming = False
+        for _ in range(6):
+            evt = await wb.receive_json_from(timeout=2)
+            if evt['type'] == 'call.incoming':
+                got_incoming = True
+                call_id = evt['data']['call']['id']
+                break
+        self.assertTrue(got_incoming)
+        await wb.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        for _ in range(6):
+            evt = await wa.receive_json_from(timeout=2)
+            if evt['type'] == 'call.accepted':
+                break
+        self.assertEqual(evt['type'], 'call.accepted')
+        await wa.send_json_to({'type': 'call.signal', 'call_id': call_id, 'data': {'sdp': {'type': 'offer', 'sdp': 'x'}}})
+        for _ in range(6):
+            evt = await wb.receive_json_from(timeout=2)
+            if evt['type'] == 'call.signal':
+                break
+        self.assertEqual(evt['data']['data']['sdp']['type'], 'offer')
+
+        await wa.disconnect()
+        await wb.disconnect()
+
+
+class CallResilienceTests(TransactionTestCase):
+    """Un appel ne doit pas se couper à la moindre coupure de la connexion temps réel."""
+
+    async def connect(self, user):
+        from chat.consumers import KozonsConsumer
+        comm = WebsocketCommunicator(KozonsConsumer.as_asgi(), '/ws/')
+        comm.scope['user'] = user
+        ok, _ = await comm.connect()
+        self.assertTrue(ok)
+        return comm
+
+    async def recv(self, comm, kind, tries=15):
+        for _ in range(tries):
+            evt = await comm.receive_json_from(timeout=2)
+            if evt['type'] == kind:
+                return evt['data']
+        raise AssertionError(f'{kind} non reçu')
+
+    async def ongoing_call(self):
+        from accounts import presence
+        presence.reset()
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
+        call_id = (await self.recv(wb, 'call.incoming'))['call']['id']
+        await wb.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        await self.recv(wa, 'call.accepted')
+        return alice, bob, wa, wb, call_id
+
+    async def status(self, call_id):
+        from chat.models import Call
+        return await sync_to_async(lambda: Call.objects.get(pk=call_id).status)()
+
+    @override_settings(CALL_RECONNECT_GRACE=0.5)
+    async def test_short_drop_keeps_call_and_resyncs(self):
+        import asyncio
+        alice, bob, wa, wb, call_id = await self.ongoing_call()
+        await wa.disconnect()                      # réseau de l'appelante coupé…
+        wa = await self.connect(alice)             # … puis rétabli avant la fin du délai de grâce
+        resync = await self.recv(wa, 'call.accepted')
+        self.assertTrue(resync['resync'])
+        await asyncio.sleep(0.8)
+        self.assertEqual(await self.status(call_id), 'ongoing')
+        # La signalisation passe toujours par la nouvelle connexion.
+        await wb.send_json_to({'type': 'call.signal', 'call_id': call_id, 'data': {'restart': True}})
+        self.assertEqual((await self.recv(wa, 'call.signal'))['data'], {'restart': True})
+        await wa.disconnect()
+        await wb.disconnect()
+
+    @override_settings(CALL_RECONNECT_GRACE=0.3)
+    async def test_lasting_drop_ends_call(self):
+        import asyncio
+        alice, bob, wa, wb, call_id = await self.ongoing_call()
+        await wa.disconnect()
+        self.assertEqual(await self.status(call_id), 'ongoing')   # pas raccroché tout de suite
+        await asyncio.sleep(0.7)
+        self.assertEqual(await self.status(call_id), 'ended')
+        self.assertEqual((await self.recv(wb, 'call.ended'))['reason'], 'ended')
+        await wb.disconnect()
+
+    async def test_ghost_call_does_not_make_callee_busy(self):
+        from chat.models import Call
+        from django.utils import timezone
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
+        carol = await sync_to_async(User.objects.create_user)('carol', password='x', can_connect=True)
+        # Ancien appel resté « en cours » (serveur redémarré pendant l'appel, par exemple).
+        ghost = await sync_to_async(Call.objects.create)(caller=carol, callee=bob, status='ongoing', answered_at=timezone.now())
+        from accounts import presence
+        presence.reset()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
+        self.assertIn('call', await self.recv(wb, 'call.incoming'))
+        self.assertEqual(await self.status(ghost.pk), 'ended')
+        await wa.disconnect()
+        await wb.disconnect()
+
+    async def two_users(self):
+        from accounts import presence
+        presence.reset()
+        alice = await sync_to_async(User.objects.create_user)('alice', password='x', can_connect=True)
+        bob = await sync_to_async(User.objects.create_user)('bob', password='x', can_connect=True)
+        return alice, bob
+
+    @override_settings(CALL_RING_TIMEOUT=0.3)
+    async def test_unanswered_call_becomes_missed_on_server(self):
+        import asyncio
+        alice, bob = await self.two_users()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'ref': 'r1'})
+        created = await self.recv(wa, 'call.created')
+        self.assertEqual(created['ref'], 'r1')
+        call_id = created['call']['id']
+        await self.recv(wb, 'call.incoming')
+        # Personne ne décroche et le client de l'appelante ne raccroche pas : le serveur conclut.
+        await asyncio.sleep(0.6)
+        self.assertEqual(await self.status(call_id), 'missed')
+        self.assertEqual((await self.recv(wb, 'call.ended'))['reason'], 'missed')
+        await wa.disconnect()
+        await wb.disconnect()
+
+    async def test_new_device_rings_without_duplicating_on_others(self):
+        alice, bob = await self.two_users()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk})
+        call_id = (await self.recv(wb, 'call.incoming'))['call']['id']
+        # Bob ouvre l'application sur un second appareil (depuis la notification) : il sonne aussi…
+        wb2 = await self.connect(bob)
+        self.assertEqual((await self.recv(wb2, 'call.incoming'))['call']['id'], call_id)
+        # … sans renvoyer l'appel au premier appareil (qui l'aurait pris pour un second appel).
+        self.assertTrue(await wb.receive_nothing(timeout=0.3))
+        await wb2.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        await self.recv(wa, 'call.accepted')
+        self.assertEqual(await self.status(call_id), 'ongoing')
+        # Décroché trop tard ailleurs : refus explicite, l'appel reste à l'appareil qui a répondu.
+        await wb.send_json_to({'type': 'call.accept', 'call_id': call_id})
+        self.assertIn("n'est plus disponible", (await self.recv(wb, 'error'))['message'])
+        for comm in (wa, wb, wb2):
+            await comm.disconnect()
+
+    async def test_calling_again_replaces_the_previous_ring(self):
+        alice, bob = await self.two_users()
+        wa, wb = await self.connect(alice), await self.connect(bob)
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'ref': 'a'})
+        first = (await self.recv(wa, 'call.created'))['call']['id']
+        await wa.send_json_to({'type': 'call.start', 'to': bob.pk, 'ref': 'b'})
+        second = await self.recv(wa, 'call.created')
+        self.assertEqual(second['ref'], 'b')
+        self.assertEqual(await self.status(first), 'missed')
+        self.assertEqual(await self.status(second['call']['id']), 'ringing')
+        # Bob déjà en communication : son application répond « occupé », pas « refusé ».
+        await wb.send_json_to({'type': 'call.decline', 'call_id': second['call']['id'], 'busy': True})
+        ended = await self.recv(wa, 'call.ended')
+        while ended['call']['id'] != second['call']['id']:
+            ended = await self.recv(wa, 'call.ended')
+        self.assertEqual(ended['reason'], 'busy')
+        await wa.disconnect()
+        await wb.disconnect()
+
+
+@override_settings(MEDIA_ROOT=MEDIA)
+class DeleteHistoryTests(TransactionTestCase):
+    """Supprimer des discussions et des appels de son historique, pour soi uniquement (comme WhatsApp)."""
+
+    def test_delete_conversation_for_me_only_and_comes_back(self):
+        from chat import services
+        alice, ca = make_user('alice')
+        bob, cb = make_user('bob')
+        conv = services.get_or_create_direct(alice, bob)
+        services.create_message(conv, bob, kind='text', text='salut')
+        self.assertEqual(post(ca, 'conversations/delete', {'ids': [conv.pk]}).json(), {'deleted': 1})
+        self.assertEqual(ca.get('/api/conversations').json()['results'], [])                   # disparue chez Alice
+        self.assertEqual(len(cb.get('/api/conversations').json()['results']), 1)                 # intacte chez Bob
+        self.assertEqual(ca.get(f'/api/conversations/{conv.pk}/messages').json()['results'], [])  # messages effacés pour elle
+        self.assertEqual(len(cb.get(f'/api/conversations/{conv.pk}/messages').json()['results']), 1)
+        services.create_message(conv, bob, kind='text', text='tu es là ?')
+        listed = ca.get('/api/conversations').json()['results']
+        self.assertEqual([c['id'] for c in listed], [conv.pk])                                    # revenue avec le nouveau message
+        self.assertEqual([m['text'] for m in ca.get(f'/api/conversations/{conv.pk}/messages').json()['results']], ['tu es là ?'])
+        # Pas de suppression des discussions des autres.
+        carol, cc = make_user('carol')
+        self.assertEqual(post(cc, 'conversations/delete', {'ids': [conv.pk]}).json(), {'deleted': 0})
+
+    def test_delete_calls_for_me_only(self):
+        from chat.models import Call
+        alice, ca = make_user('alice')
+        bob, cb = make_user('bob')
+        c1 = Call.objects.create(caller=alice, callee=bob, status='ended')
+        c2 = Call.objects.create(caller=bob, callee=alice, status='missed')
+        live = Call.objects.create(caller=alice, callee=bob, status='ongoing')
+        post(ca, 'calls/delete', {'ids': [c1.pk]})
+        self.assertEqual({c['id'] for c in ca.get('/api/calls').json()['results']}, {c2.pk, live.pk})
+        self.assertEqual(len(cb.get('/api/calls').json()['results']), 3)                          # Bob garde tout
+        post(ca, 'calls/delete', {'all': True})
+        self.assertEqual([c['id'] for c in ca.get('/api/calls').json()['results']], [live.pk])   # appel en cours conservé
+        self.assertEqual(post(ca, 'calls/delete', {}).status_code, 400)

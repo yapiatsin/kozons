@@ -1,11 +1,24 @@
-env/
+# --- Commun -----------------------------------------------------------------
 __pycache__/
 *.pyc
-db.sqlite3
-db.sqlite3-*
-db.sqlite3.bak
-media/
-staticfiles/
-data/
-backups/
 .env
+
+# --- KozonWeb (Django) ------------------------------------------------------
+# Chemins ancrés sur KozonWeb/ : un dossier « data/ » ou « media/ » côté Flutter
+# (Kozonmobile/lib/data/…) ne doit pas être ignoré.
+/KozonWeb/env/
+/KozonWeb/db.sqlite3
+/KozonWeb/db.sqlite3-*
+/KozonWeb/db.sqlite3.bak
+/KozonWeb/media/
+/KozonWeb/staticfiles/
+/KozonWeb/data/
+/KozonWeb/backups/
+# Anciens emplacements (avant le passage à KozonWeb/), le temps de les déplacer.
+/env/
+/backups/
+/media/
+/db.sqlite3*
+
+# --- Kozonmobile (Flutter) --------------------------------------------------
+# Le reste est dans Kozonmobile/.gitignore (généré par flutter create).
