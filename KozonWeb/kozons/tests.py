@@ -9,6 +9,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from PIL import Image
 
+from accounts import tokens
 from accounts.models import Block, OneTimeCode, User
 from chat.models import (Call, Conversation, HiddenMessage, Message, Participant, PollOption, PollVote, Reaction,
                          StarredMessage, Sticker, UserSticker, ViewOnceOpened)
@@ -42,6 +43,7 @@ class AdminPagesTests(TestCase):
         now = timezone.now()
         Block.objects.create(blocker=a, blocked=b)
         OneTimeCode.objects.create(user=a, code_hash='x' * 64, expires_at=now + timedelta(minutes=5))
+        tokens.issue(a, device='Kozons android')
         group = Conversation.objects.create(kind='group', title='Groupe', created_by=a, disappearing_seconds=86400)
         direct = Conversation.objects.create(kind='direct', direct_key='1:2')
         for conv in (group, direct):

@@ -3,7 +3,7 @@ from django.contrib.auth.admin import UserAdmin
 from django.utils import timezone
 from django.utils.html import format_html
 
-from .models import Block, OneTimeCode, User
+from .models import ApiToken, Block, OneTimeCode, User
 
 
 def thumb(url, size=36, round_=True):
@@ -94,6 +94,22 @@ class OneTimeCodeAdmin(admin.ModelAdmin):
     def invalidate(self, request, queryset):
         count = queryset.filter(used_at__isnull=True).update(used_at=timezone.now())
         self.message_user(request, f'{count} code(s) invalidé(s).')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ApiToken)
+class ApiTokenAdmin(admin.ModelAdmin):
+    """Appareils mobiles connectés : supprimer une ligne déconnecte ce téléphone."""
+    list_display = ('user', 'device', 'created_at', 'last_used_at')
+    list_select_related = ('user',)
+    search_fields = ('user__username', 'user__email', 'device')
+    readonly_fields = ('user', 'device', 'created_at', 'last_used_at')
+    exclude = ('key_hash', 'auth_hash')
 
     def has_add_permission(self, request):
         return False

@@ -16,6 +16,7 @@ urlpatterns = [
     path('invite/<str:code>', accounts.invite_lookup),
     path('auth/login', accounts.login_view),
     path('auth/logout', accounts.logout_view),
+    path('auth/token', accounts.token_login),   # applications mobiles : identifiants → jeton
     path('auth/password', accounts.change_password),
     path('auth/password/forgot', accounts.password_forgot),
     path('auth/password/verify', accounts.password_verify),

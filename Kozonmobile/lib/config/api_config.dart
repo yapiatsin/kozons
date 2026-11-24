@@ -33,7 +33,12 @@ class ApiConfig {
   static const String _envName = String.fromEnvironment('KOZONS_ENV', defaultValue: 'local');
   static const String _override = String.fromEnvironment('KOZONS_API_URL');
 
-  static KozonsEnv get env => _envName == 'prod' ? KozonsEnv.prod : KozonsEnv.local;
+  /// Production si KOZONS_ENV=prod, ou si KOZONS_API_URL désigne le serveur de production.
+  static KozonsEnv get env {
+    if (_envName == 'prod') return KozonsEnv.prod;
+    if (_override.isNotEmpty && _strip(_override) == prodUrl) return KozonsEnv.prod;
+    return KozonsEnv.local;
+  }
 
   /// Racine du serveur, sans barre finale (ex. https://kozonstic.com).
   static String get serverUrl {

@@ -61,9 +61,12 @@ En local, l'émulateur Android joint le PC via `http://10.0.2.2:8030`, le simula
 `http://127.0.0.1:8030`. Autre adresse : `--dart-define=KOZONS_API_URL=http://IP:8030`.
 Détails : [Kozonmobile/README.md](Kozonmobile/README.md).
 
-À savoir pour la suite : l'API authentifie aujourd'hui par **cookie de session Django + jeton CSRF**
-(comme le front web). Le client mobile devra conserver ces cookies, ou KozonWeb devra exposer une
-authentification par jeton dédiée au mobile.
+**Connexion du mobile** : le site utilise le cookie de session + jeton CSRF ; l'application, elle,
+obtient un **jeton d'API** (`POST /api/auth/token`, mêmes identifiants et mêmes règles que le site)
+et l'envoie à chaque requête (`Authorization: Token kz_…`), y compris à l'ouverture du WebSocket `/ws/`.
+Déconnexion = jeton révoqué ; changer de mot de passe ou retirer l'accès (`can_connect`) ferme aussi
+les téléphones. Les appareils connectés sont visibles (et révocables) dans l'admin Django, « Api tokens ».
+Code : `KozonWeb/accounts/tokens.py`, `accounts/middleware.py`, `accounts/ws_auth.py`.
 
 ## Déploiement sur le VPS
 

@@ -193,6 +193,8 @@ class KozonsConsumer(LiveConsumerMixin, MeetConsumerMixin, AsyncJsonWebsocketCon
         return user, list(contact_ids(user) - {user.pk})
 
     def _session_alive(self):
+        if self.scope.get('auth_token') is not None:
+            return True  # application mobile (jeton) : pas d'expiration pour inactivité
         session = self.scope.get('session')
         if session is not None and session.get('kz_remember'):
             return True  # « Se souvenir de moi » : pas d'expiration pour inactivité

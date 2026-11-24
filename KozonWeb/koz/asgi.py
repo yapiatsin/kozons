@@ -11,15 +11,16 @@ django_asgi_app = get_asgi_application()
 
 from channels.auth import AuthMiddlewareStack  # noqa: E402
 from channels.routing import ProtocolTypeRouter, URLRouter  # noqa: E402
-from channels.security.websocket import AllowedHostsOriginValidator  # noqa: E402
 from django.urls import path  # noqa: E402
 
+from accounts.ws_auth import OriginOrTokenValidator, TokenAuthMiddleware  # noqa: E402
 from chat.consumers import KozonsConsumer  # noqa: E402
 
 
+# Navigateur : cookie de session + origine vérifiée. Application mobile : en-tête « Authorization: Token kz_… ».
 application = ProtocolTypeRouter({
     'http': django_asgi_app,
-    'websocket': AllowedHostsOriginValidator(
-        AuthMiddlewareStack(URLRouter([path('ws/', KozonsConsumer.as_asgi())]))
+    'websocket': OriginOrTokenValidator(
+        AuthMiddlewareStack(TokenAuthMiddleware(URLRouter([path('ws/', KozonsConsumer.as_asgi())])))
     ),
 })

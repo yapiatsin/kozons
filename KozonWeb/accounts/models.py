@@ -111,3 +111,24 @@ class PushSubscription(models.Model):
     # inactivité, les notifications ne montrent plus le contenu (« Nouveau message »).
     session_key = models.CharField(max_length=40, blank=True, db_index=True)
     last_active_at = models.DateTimeField(null=True, blank=True)
+
+
+class ApiToken(models.Model):
+    """Jeton d'une application mobile (« Authorization: Token kz_… »), à la place du cookie de session.
+
+    Seule l'empreinte SHA-256 du jeton est enregistrée : la base ne permet pas de le retrouver.
+    `auth_hash` fige l'empreinte du mot de passe à la création : changer ou réinitialiser le mot de
+    passe révoque donc les jetons des autres appareils, comme pour les sessions du navigateur.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='api_tokens')
+    key_hash = models.CharField(max_length=64, unique=True)
+    auth_hash = models.CharField(max_length=128)
+    device = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.user} · {self.device or "appareil"}'

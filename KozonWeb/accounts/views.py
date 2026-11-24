@@ -15,9 +15,11 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 
 from kozons.api import ApiError, api, as_bool, body, media_kind, rate_limit
 
+from . import tokens
 from .models import Block, OneTimeCode, User
 from .serializers import user_brief, user_private
 from .utils import send_in_background, send_password_changed_email, send_password_reset_otp_email
@@ -145,23 +147,41 @@ def invite_lookup(request, code):
                         'avatar': inviter.avatar.url if inviter.avatar and inviter.avatar_visibility == 'everyone' else None}}
 
 
+def check_credentials(request, data):
+    """Identifiant (nom d'utilisateur ou e-mail) + mot de passe → utilisateur, sinon ApiError."""
+    identifier = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    account = find_user(identifier)
+    user = authenticate(request, username=account.username if account else identifier.lower(), password=password)
+    if user is None:
+        if account and account.is_active and not account.can_connect and account.check_password(password):
+            raise ApiError(PENDING_ACCESS_MESSAGE, 403)
+        raise ApiError('Identifiants incorrects.', 401)
+    return user
+
+
 @api(['POST'], auth=False)
 def login_view(request):
     rate_limit(request, 'login', 20, 300)
     data = body(request)
-    # Connexion par nom d'utilisateur ou par adresse e-mail.
-    identifier = (data.get('username') or '').strip()
-    account = find_user(identifier)
-    user = authenticate(request, username=account.username if account else identifier.lower(),
-                        password=data.get('password') or '')
-    if user is None:
-        password = data.get('password') or ''
-        if account and account.is_active and not account.can_connect and account.check_password(password):
-            raise ApiError(PENDING_ACCESS_MESSAGE, 403)
-        raise ApiError('Identifiants incorrects.', 401)
+    user = check_credentials(request, data)
     remember = as_bool(data.get('remember'))
     open_session(request, user, remember=remember)
     return {'user': user_private(user), 'remember': remember}
+
+
+# Pas de cookie en jeu (le jeton est renvoyé dans la réponse) : la vérification CSRF n'a pas lieu d'être,
+# et une application native n'a de toute façon ni cookie CSRF ni Referer.
+@csrf_exempt
+@api(['POST'], auth=False)
+def token_login(request):
+    """Applications mobiles : identifiants → jeton d'API, mêmes contrôles que la connexion web."""
+    rate_limit(request, 'login', 20, 300)
+    data = body(request)
+    user = check_credentials(request, data)
+    key = tokens.issue(user, device=data.get('device') or request.headers.get('User-Agent', ''))
+    User.objects.filter(pk=user.pk).update(last_login=timezone.now())
+    return {'token': key, 'user': user_private(user)}
 
 
 def open_session(request, user, remember=False):
@@ -175,6 +195,10 @@ def open_session(request, user, remember=False):
 
 @api(['POST'])
 def logout_view(request):
+    token = getattr(request, 'auth_token', None)
+    if token is not None:
+        token.delete()   # application mobile : ce jeton ne fonctionne plus
+        return
     logout(request)
 
 
@@ -209,7 +233,8 @@ def me(request):
         elif as_bool(data.get('remove_avatar')):
             user.avatar = None
         user.save()
-    return {'user': user_private(user), 'remember': bool(request.session.get('kz_remember'))}
+    remember = getattr(request, 'auth_token', None) is not None or bool(request.session.get('kz_remember'))
+    return {'user': user_private(user), 'remember': remember}
 
 
 @api(['POST'])
@@ -223,7 +248,12 @@ def change_password(request):
         raise ApiError(' '.join(e.messages))
     request.user.set_password(data['new_password'])
     request.user.save()
-    update_session_auth_hash(request, request.user)
+    # Cet appareil reste connecté ; les autres sessions et jetons sont fermés.
+    token = getattr(request, 'auth_token', None)
+    if token is not None:
+        tokens.refresh(token, request.user)
+    else:
+        update_session_auth_hash(request, request.user)
 
 
 # ---------------------------------------------------------------- Mot de passe oublié

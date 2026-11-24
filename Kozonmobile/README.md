@@ -3,6 +3,25 @@
 Client Android / iOS de Kozons. Il consomme l'API de [KozonWeb](../KozonWeb) :
 API JSON sous `/api/`, temps réel par WebSocket sous `/ws/`, fichiers sous `/media/`.
 
+Aujourd'hui : connexion (nom d'utilisateur ou e-mail + mot de passe, mêmes comptes que le site),
+liste des discussions (épinglées, non lus, archivées, sourdine), déconnexion. Thème clair / sombre
+du téléphone, aux couleurs du site.
+
+## Organisation
+
+| Fichier | Rôle |
+|---|---|
+| `lib/config/api_config.dart` | Adresse du serveur (local / production) |
+| `lib/api/api_client.dart` | Appels à l'API, en-tête `Authorization: Token kz_…`, messages d'erreur |
+| `lib/auth/auth_controller.dart` | Connexion, déconnexion, reprise au démarrage, session expirée |
+| `lib/auth/secure_store.dart` | Jeton gardé dans le stockage chiffré du téléphone (`flutter_secure_storage`) |
+| `lib/models/` | Utilisateur, discussion, aperçu du dernier message, heure de la liste |
+| `lib/screens/` | Écran de connexion, liste des discussions |
+| `lib/ui/` | Thème (couleurs du site), avatars |
+
+Le jeton est obtenu par `POST /api/auth/token` ; un jeton refusé par le serveur (déconnexion à
+distance, mot de passe changé, accès retiré) ramène à l'écran de connexion.
+
 ## Lancer
 
 ```bash
@@ -41,3 +60,5 @@ et pour le réseau local sur iOS (`NSAllowsLocalNetworking`) ; la production pas
 flutter analyze
 flutter test
 ```
+
+Les tests utilisent un faux serveur (`test/fake_server.dart`) : aucun réseau nécessaire.

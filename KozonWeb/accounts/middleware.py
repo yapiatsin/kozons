@@ -2,11 +2,40 @@ import time
 
 from django.conf import settings
 from django.contrib.auth import logout
+from django.http import JsonResponse
 from django.utils import timezone
+
+from . import tokens
 
 # Les requêtes d'authentification ne comptent pas comme activité et ne sont jamais bloquées.
 EXEMPT_PREFIXES = ('/api/auth/', '/api/push/key')
 TOUCH_EVERY = 60  # secondes : on n'écrit la session qu'une fois par minute au plus
+TOKEN_LOGIN_PATH = '/api/auth/token'
+
+
+class ApiTokenMiddleware:
+    """Applications mobiles : « Authorization: Token kz_… » à la place du cookie de session.
+
+    Jeton valide : la requête est authentifiée par lui seul (le cookie éventuel est ignoré) et le
+    contrôle CSRF est levé — il protège les cookies du navigateur, et un site tiers ne peut pas
+    ajouter cet en-tête (pas de CORS). Jeton invalide sur l'API : 401, l'application revient à
+    l'écran de connexion. À placer après AuthenticationMiddleware.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        key = tokens.parse_header(request.headers.get('Authorization'))
+        if key is not None:
+            token = tokens.authenticate(key)
+            if token is not None:
+                request.user = token.user
+                request.auth_token = token
+                request._dont_enforce_csrf_checks = True
+            elif request.path.startswith('/api/') and request.path != TOKEN_LOGIN_PATH:
+                return JsonResponse({'error': 'Session expirée. Reconnectez-vous.'}, status=401)
+        return self.get_response(request)
 
 
 class IdleLogoutMiddleware:
@@ -23,6 +52,9 @@ class IdleLogoutMiddleware:
 
     def __call__(self, request):
         user = getattr(request, 'user', None)
+        # Application mobile (jeton) : pas de session ni de déconnexion pour inactivité, comme WhatsApp.
+        if getattr(request, 'auth_token', None) is not None:
+            return self.get_response(request)
         if (user is not None and user.is_authenticated and request.path.startswith('/api/')
                 and not request.path.startswith(EXEMPT_PREFIXES)):
             now = time.time()
